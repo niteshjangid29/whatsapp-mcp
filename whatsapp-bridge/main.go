@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -222,6 +224,58 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	return true, fmt.Sprintf("Message sent to %s", recipient)
 }
 
+func sendWhatsAppImageMessage(client *whatsmeow.Client, recipient string, message string, image []byte) (bool, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp"
+	}
+
+	// Create JID for recipient
+	var recipientJID types.JID
+	var err error
+
+	// Check if recipient is a JID
+	isJID := strings.Contains(recipient, "@")
+
+	if isJID {
+		// Parse the JID string
+		recipientJID, err = types.ParseJID(recipient)
+		if err != nil {
+			return false, fmt.Sprintf("Error parsing JID: %v", err)
+		}
+	} else {
+		// Create JID from phone number
+		recipientJID = types.JID{
+			User:   recipient,
+			Server: "s.whatsapp.net", // For personal chats
+		}
+	}
+
+	resp, err := client.Upload(context.Background(), image, whatsmeow.MediaImage)
+	// handle error
+
+	imageMsg := &waE2E.ImageMessage{
+		Caption:  proto.String(message),
+		Mimetype: proto.String("image/png"), // replace this with the actual mime type
+		// you can also optionally add other fields like ContextInfo and JpegThumbnail here
+
+		URL:           &resp.URL,
+		DirectPath:    &resp.DirectPath,
+		MediaKey:      resp.MediaKey,
+		FileEncSHA256: resp.FileEncSHA256,
+		FileSHA256:    resp.FileSHA256,
+		FileLength:    &resp.FileLength,
+	}
+	_, err = client.SendMessage(context.Background(), recipientJID, &waE2E.Message{
+		ImageMessage: imageMsg,
+	})
+
+	if err != nil {
+		return false, fmt.Sprintf("Error sending image message: %v", err)
+	}
+
+	return true, fmt.Sprintf("Image message sent to %s", recipient)
+}
+
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, port int) {
 	// Handler for sending messages
@@ -264,6 +318,57 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 		})
 	})
 
+	http.HandleFunc("/api/send-image", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("Received request to send message")
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		file, handler, err := r.FormFile("file")
+		if err != nil {
+			fmt.Println("Error retrieving file:", err)
+			http.Error(w, "Error retrieving file", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		// Get additional form fields
+		recipient := r.FormValue("recipient")
+		message := r.FormValue("message")
+
+		// Read the file into a byte array
+		fileBytes, err := io.ReadAll(file)
+		if err != nil {
+			fmt.Println("Error reading file:", err)
+			http.Error(w, "Error reading file", http.StatusInternalServerError)
+			return
+		}
+
+		// Validate request
+		if recipient == "" || message == "" {
+			http.Error(w, "Recipient and message are required", http.StatusBadRequest)
+			return
+		}
+
+		// Send the message
+		success, message := sendWhatsAppImageMessage(client, recipient, message, fileBytes)
+		fmt.Println("Message sent", success, message)
+		// Set response headers
+		w.Header().Set("Content-Type", "application/json")
+
+		// Set appropriate status code
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+
+		// Send response
+		json.NewEncoder(w).Encode(SendMessageResponse{
+			Success: success,
+			Message: message,
+		})
+	})
+
 	// Start the server
 	serverAddr := fmt.Sprintf(":%d", port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
@@ -278,7 +383,7 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 
 func main() {
 	// Set up logger
-	logger := waLog.Stdout("Client", "INFO", true)
+	logger := waLog.Stdout("Client", "DEBUG", true)
 	logger.Infof("Starting WhatsApp client...")
 
 	// Create database connection for storing session data
@@ -330,6 +435,10 @@ func main() {
 		case *events.Message:
 			// Process regular messages
 			handleMessage(client, messageStore, v, logger)
+
+		case *events.Receipt:
+			// Process regular messages
+			handleReceipt(client, messageStore, v, logger)
 
 		case *events.HistorySync:
 			// Process history sync events
@@ -536,6 +645,10 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 		fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
 	}
+}
+
+func handleReceipt(client *whatsmeow.Client, messageStore *MessageStore, receipt *events.Receipt, logger waLog.Logger) {
+	logger.Infof("receipt %v", receipt)
 }
 
 // Handle history sync events
