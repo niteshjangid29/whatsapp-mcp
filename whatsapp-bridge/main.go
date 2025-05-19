@@ -1,20 +1,27 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"go.mau.fi/whatsmeow/proto/waE2E"
 	"io"
+	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"go.mau.fi/whatsmeow/proto/waE2E"
+
+	"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
 
@@ -252,6 +259,9 @@ func sendWhatsAppImageMessage(client *whatsmeow.Client, recipient string, messag
 
 	resp, err := client.Upload(context.Background(), image, whatsmeow.MediaImage)
 	// handle error
+	if err != nil {
+		return false, fmt.Sprintf("Error uploading image: %v", err)
+	}
 
 	imageMsg := &waE2E.ImageMessage{
 		Caption:  proto.String(message),
@@ -274,6 +284,61 @@ func sendWhatsAppImageMessage(client *whatsmeow.Client, recipient string, messag
 	}
 
 	return true, fmt.Sprintf("Image message sent to %s", recipient)
+}
+
+func sendWhatsAppDocumentMessage(client *whatsmeow.Client, recipient string, message string, document []byte, fileName string, mimeType string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp"
+	}
+
+	// Create JID for recipient
+	var recipientJID types.JID
+	var err error
+
+	// Check if recipient is a JID
+	isJID := strings.Contains(recipient, "@")
+
+	if isJID {
+		// Parse the JID string
+		recipientJID, err = types.ParseJID(recipient)
+		if err != nil {
+			return false, fmt.Sprintf("Error parsing JID: %v", err)
+		}
+	} else {
+		// Create JID from phone number
+		recipientJID = types.JID{
+			User:   recipient,
+			Server: "s.whatsapp.net", // For personal chats
+		}
+	}
+
+	resp, err := client.Upload(context.Background(), document, whatsmeow.MediaDocument)
+	if err != nil {
+		return false, fmt.Sprintf("Error uploading document: %v", err)
+	}
+
+	docMsg := &waE2E.DocumentMessage{
+		Title:         proto.String(fileName),
+		FileName:      proto.String(fileName),
+		Mimetype:      proto.String(mimeType),
+		Caption:       proto.String(message),
+		URL:           &resp.URL,
+		DirectPath:    &resp.DirectPath,
+		MediaKey:      resp.MediaKey,
+		FileSHA256:    resp.FileSHA256,
+		FileEncSHA256: resp.FileEncSHA256,
+		FileLength:    &resp.FileLength,
+	}
+
+	_, err = client.SendMessage(context.Background(), recipientJID, &waE2E.Message{
+		DocumentMessage: docMsg,
+	})
+
+	if err != nil {
+		return false, fmt.Sprintf("Error sending document message: %v", err)
+	}
+
+	return true, fmt.Sprintf("Document message sent to %s", recipient)
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
@@ -325,7 +390,7 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 			return
 		}
 
-		file, handler, err := r.FormFile("file")
+		file, _, err := r.FormFile("file")
 		if err != nil {
 			fmt.Println("Error retrieving file:", err)
 			http.Error(w, "Error retrieving file", http.StatusBadRequest)
@@ -369,6 +434,56 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 		})
 	})
 
+	http.HandleFunc("/api/send-document", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("Received request to send document message")
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		file, header, err := r.FormFile("file")
+		fileName := header.Filename
+		mimeType := header.Header.Get("Content-Type")
+		if err != nil {
+			fmt.Println("Error retrieving file:", err)
+			http.Error(w, "Error retrieving file", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		// Get additional form fields
+		recipient := r.FormValue("recipient")
+		message := r.FormValue("message")
+
+		// Read the file into a byte array
+		fileBytes, err := io.ReadAll(file)
+		if err != nil {
+			fmt.Println("Error reading file:", err)
+			http.Error(w, "Error reading file", http.StatusInternalServerError)
+			return
+		}
+
+		// Validate request
+		if recipient == "" || message == "" {
+			http.Error(w, "Recipient and message are required", http.StatusBadRequest)
+			return
+		}
+
+		// Send the message
+		success, message := sendWhatsAppDocumentMessage(client, recipient, message, fileBytes, fileName, mimeType)
+		fmt.Println("Message sent", success, message)
+		// Set response headers
+		w.Header().Set("Content-Type", "application/json")
+		// Set appropriate status code
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+
+		json.NewEncoder(w).Encode(SendMessageResponse{
+			Success: success,
+			Message: message,
+		})
+	})
+
 	// Start the server
 	serverAddr := fmt.Sprintf(":%d", port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
@@ -379,6 +494,172 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
+}
+
+const LogAPIEndpoint = "https://backend.railse.com/whatsapp/log-message"
+
+func logMessage(senderPhone string, text string, recipientPhone string, messageTime time.Time) error {
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	// load .env file
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+	// get BEARER_TOKEN from .env file
+	bearerToken := os.Getenv("BEARER_TOKEN")
+	if bearerToken == "" {
+		log.Fatal("BEARER_TOKEN not set in .env file")
+	}
+
+	_ = writer.WriteField("entity_phone_number_from", senderPhone)
+	_ = writer.WriteField("entity_phone_number_to", recipientPhone)
+	_ = writer.WriteField("message_text", text)
+	_ = writer.WriteField("message_status", "READ")
+	_ = writer.WriteField("message_time", strconv.FormatInt(messageTime.UnixMilli(), 10))
+
+	writer.Close()
+
+	req, err := http.NewRequest("POST", LogAPIEndpoint, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+	log.Println("📤 REQUEST", req)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Println("❌ Error sending log:", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	return nil
+}
+
+func logImageMessage(senderPhone string, text string, recipientPhone string, filePath string, messageTime time.Time) error {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+	bearerToken := os.Getenv("BEARER_TOKEN")
+	if bearerToken == "" {
+		log.Fatal("BEARER_TOKEN not set in .env file")
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		log.Println("❌ Error opening file:", err)
+		return err
+	}
+	defer file.Close()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	_ = writer.WriteField("entity_phone_number_from", senderPhone)
+	_ = writer.WriteField("entity_phone_number_to", recipientPhone)
+	_ = writer.WriteField("message_text", text)
+	_ = writer.WriteField("message_status", "READ")
+	_ = writer.WriteField("message_time", strconv.FormatInt(messageTime.UnixMilli(), 10))
+
+	part, err := writer.CreateFormFile("files", filepath.Base(filePath))
+	if err != nil {
+		log.Println("❌ Error creating form file:", err)
+		return err
+	}
+
+	_, err = io.Copy(part, file)
+	if err != nil {
+		log.Println("❌ Error copying file data:", err)
+		return err
+	}
+
+	writer.Close()
+
+	req, err := http.NewRequest("POST", LogAPIEndpoint, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+	log.Println("📤 Image REQUEST", req)
+
+	clientHTTP := &http.Client{}
+	resp, err := clientHTTP.Do(req)
+	if err != nil {
+		log.Println("❌ Error sending log:", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	log.Println("✅ Image message logged successfully")
+	return nil
+}
+
+func logDocumentMessage(senderPhone string, text string, recipientPhone string, filePath string, messageTime time.Time) error {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+	bearerToken := os.Getenv("BEARER_TOKEN")
+	if bearerToken == "" {
+		log.Fatal("BEARER_TOKEN not set in .env file")
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		log.Println("❌ Error opening file:", err)
+		return err
+	}
+	defer file.Close()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	_ = writer.WriteField("entity_phone_number_from", senderPhone)
+	_ = writer.WriteField("entity_phone_number_to", recipientPhone)
+	_ = writer.WriteField("message_text", text)
+	_ = writer.WriteField("message_status", "READ")
+	_ = writer.WriteField("message_time", strconv.FormatInt(messageTime.UnixMilli(), 10))
+	part, err := writer.CreateFormFile("files", filepath.Base(filePath))
+	if err != nil {
+		log.Println("❌ Error creating form file:", err)
+		return err
+	}
+
+	_, err = io.Copy(part, file)
+	if err != nil {
+		log.Println("❌ Error copying file data:", err)
+		return err
+	}
+
+	writer.Close()
+
+	req, err := http.NewRequest("POST", LogAPIEndpoint, body)
+	if err != nil {
+		log.Println("❌ Error creating request:", err)
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+	log.Println("📤 Document REQUEST", req)
+
+	clientHTTP := &http.Client{}
+	resp, err := clientHTTP.Do(req)
+	if err != nil {
+		log.Println("❌ Error sending log:", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	log.Println("✅ Document message logged successfully")
+	return nil
 }
 
 func main() {
@@ -435,6 +716,87 @@ func main() {
 		case *events.Message:
 			// Process regular messages
 			handleMessage(client, messageStore, v, logger)
+			sender := v.Info.Sender.User
+			timestamp := v.Info.Timestamp
+			text := v.Message.GetConversation()
+			recipient := v.Info.Chat.User
+			image := v.Message.ImageMessage
+			document := v.Message.DocumentMessage
+
+			// Check if the message is a document
+			if document != nil {
+				data, err := client.Download(v.Message.DocumentMessage)
+				if err != nil {
+					logger.Errorf("❌ Failed to download document: %v", err)
+					return
+				}
+
+				// Save document temporarily
+				tmpFile := fmt.Sprintf("store/document_%d.pdf", time.Now().UnixNano())
+				err = os.WriteFile(tmpFile, data, 0644)
+				if err != nil {
+					logger.Errorf("❌ Failed to save document: %v", err)
+					return
+				}
+				defer os.Remove(tmpFile)
+
+				sender := v.Info.Sender.User
+				recipient := v.Info.Chat.User
+				timestamp := v.Info.Timestamp
+				caption := ""
+				if v.Message.DocumentMessage.Caption != nil {
+					caption = *v.Message.DocumentMessage.Caption
+				}
+				err = logDocumentMessage(sender, caption, recipient, tmpFile, timestamp)
+				if err != nil {
+					logger.Errorf("❌ Failed to log document message: %v", err)
+				} else {
+					logger.Infof("✅ Document message logged successfully")
+				}
+				fmt.Printf("📥 Received document from %s to %s: %s\n", sender, recipient, caption)
+			}
+
+			if image != nil {
+				data, err := client.Download(v.Message.ImageMessage)
+				if err != nil {
+					logger.Errorf("❌ Failed to download image: %v", err)
+					return
+				}
+
+				// Save image temporarily
+				tmpFile := fmt.Sprintf("store/image_%d.jpg", time.Now().UnixNano())
+				err = os.WriteFile(tmpFile, data, 0644)
+				if err != nil {
+					logger.Errorf("❌ Failed to save image: %v", err)
+					return
+				}
+				defer os.Remove(tmpFile)
+
+				sender := v.Info.Sender.User
+				recipient := v.Info.Chat.User
+				timestamp := v.Info.Timestamp
+				caption := ""
+				if v.Message.ImageMessage.Caption != nil {
+					caption = *v.Message.ImageMessage.Caption
+				}
+				err = logImageMessage(sender, caption, recipient, tmpFile, timestamp)
+				if err != nil {
+					logger.Errorf("❌ Failed to log image message: %v", err)
+				} else {
+					logger.Infof("✅ Image message logged successfully")
+				}
+				fmt.Printf("📥 Received image from %s to %s: %s\n", sender, recipient, caption)
+			}
+
+			if text != "" {
+				fmt.Printf("📥 Received from %s to %s: %s\n", sender, recipient, text)
+				err := logMessage(sender, text, recipient, timestamp)
+				if err != nil {
+					logger.Errorf("❌ Failed to log message: %v", err)
+				} else {
+					logger.Infof("✅ Message logged successfully")
+				}
+			}
 
 		case *events.Receipt:
 			// Process regular messages
