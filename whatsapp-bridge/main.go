@@ -192,6 +192,12 @@ type SendMessageRequest struct {
 	Message   string `json:"message"`
 }
 
+type SendMessageResponseWithLog struct {
+	Success       bool   `json:"success"`
+	Message       string `json:"message"`
+	MessageLogged string `json:"message_logged"`
+}
+
 // Function to send a WhatsApp message
 func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string) (bool, string) {
 	if !client.IsConnected() {
@@ -352,22 +358,35 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 			return
 		}
 
-		// Parse the request body
-		var req SendMessageRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request format", http.StatusBadRequest)
-			return
-		}
+		recipient := r.FormValue("recipient")
+		message := r.FormValue("message")
 
 		// Validate request
-		if req.Recipient == "" || req.Message == "" {
+		if recipient == "" || message == "" {
 			http.Error(w, "Recipient and message are required", http.StatusBadRequest)
 			return
 		}
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message)
+		success, message := sendWhatsAppMessage(client, recipient, message)
 		fmt.Println("Message sent", success, message)
+
+		var messageLogged string
+		// Log the message
+		if success {
+			senderPhone := client.Store.ID.User
+			recipientPhone := recipient
+			msgTime := time.Now()
+			err := logMessage(senderPhone, message, recipientPhone, msgTime)
+			if err != nil {
+				fmt.Println("⚠️ Failed to log message:", err)
+				messageLogged = "Failed to log message"
+			} else {
+				fmt.Println("✅ Message logged successfully")
+				messageLogged = "Message logged successfully"
+			}
+		}
+
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
 
@@ -377,9 +396,10 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 		}
 
 		// Send response
-		json.NewEncoder(w).Encode(SendMessageResponse{
-			Success: success,
-			Message: message,
+		json.NewEncoder(w).Encode(SendMessageResponseWithLog{
+			Success:       success,
+			Message:       message,
+			MessageLogged: messageLogged,
 		})
 	})
 
@@ -468,9 +488,36 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 			return
 		}
 
+		// Save the file temporarily
+		tmpFile := fmt.Sprintf("store/document_%d.pdf", time.Now().UnixNano())
+		err = os.WriteFile(tmpFile, fileBytes, 0644)
+		if err != nil {
+			fmt.Println("Error saving file:", err)
+			http.Error(w, "Error saving file", http.StatusInternalServerError)
+			return
+		}
+		defer os.Remove(tmpFile)
+
 		// Send the message
 		success, message := sendWhatsAppDocumentMessage(client, recipient, message, fileBytes, fileName, mimeType)
 		fmt.Println("Message sent", success, message)
+
+		var messageLogged string
+		// Log the message
+		if success {
+			senderPhone := client.Store.ID.User
+			recipientPhone := recipient
+			msgTime := time.Now()
+			err := logDocumentMessage(senderPhone, message, recipientPhone, tmpFile, msgTime)
+			if err != nil {
+				fmt.Println("⚠️ Failed to log message:", err)
+				messageLogged = "Failed to log message"
+			} else {
+				fmt.Println("✅ Message logged successfully")
+				messageLogged = "Message logged successfully"
+			}
+		}
+
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
 		// Set appropriate status code
@@ -478,9 +525,10 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 			w.WriteHeader(http.StatusInternalServerError)
 		}
 
-		json.NewEncoder(w).Encode(SendMessageResponse{
-			Success: success,
-			Message: message,
+		json.NewEncoder(w).Encode(SendMessageResponseWithLog{
+			Success:       success,
+			Message:       message,
+			MessageLogged: messageLogged,
 		})
 	})
 
@@ -722,6 +770,11 @@ func main() {
 			recipient := v.Info.Chat.User
 			image := v.Message.ImageMessage
 			document := v.Message.DocumentMessage
+
+			// Do not save status messages
+			if sender == "status" || recipient == "status" || sender == "status@broadcast" || recipient == "status@broadcast" {
+				return
+			}
 
 			// Check if the message is a document
 			if document != nil {
