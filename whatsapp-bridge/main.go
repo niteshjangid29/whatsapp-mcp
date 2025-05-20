@@ -358,24 +358,30 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 			return
 		}
 
-		recipient := r.FormValue("recipient")
-		message := r.FormValue("message")
+		// Parse request body
+		var req SendMessageRequest
+		err := json.NewDecoder(r.Body).Decode(&req)
+		if err != nil {
+			fmt.Println("Error parsing request body:", err)
+			http.Error(w, "Error parsing request body", http.StatusBadRequest)
+			return
+		}
 
 		// Validate request
-		if recipient == "" || message == "" {
+		if req.Recipient == "" || req.Message == "" {
 			http.Error(w, "Recipient and message are required", http.StatusBadRequest)
 			return
 		}
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, recipient, message)
+		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message)
 		fmt.Println("Message sent", success, message)
 
 		var messageLogged string
 		// Log the message
 		if success {
 			senderPhone := client.Store.ID.User
-			recipientPhone := recipient
+			recipientPhone := req.Recipient
 			msgTime := time.Now()
 			err := logMessage(senderPhone, message, recipientPhone, msgTime)
 			if err != nil {
