@@ -374,8 +374,8 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 		}
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message)
-		fmt.Println("Message sent", success, message)
+		success, msg := sendWhatsAppMessage(client, req.Recipient, req.Message)
+		fmt.Println("Message sent", success, msg)
 
 		var messageLogged string
 		// Log the message
@@ -383,7 +383,7 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 			senderPhone := client.Store.ID.User
 			recipientPhone := req.Recipient
 			msgTime := time.Now()
-			err := logMessage(senderPhone, message, recipientPhone, msgTime)
+			err := logMessage(senderPhone, req.Message, recipientPhone, msgTime)
 			if err != nil {
 				fmt.Println("⚠️ Failed to log message:", err)
 				messageLogged = "Failed to log message"
@@ -404,7 +404,7 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 		// Send response
 		json.NewEncoder(w).Encode(SendMessageResponseWithLog{
 			Success:       success,
-			Message:       message,
+			Message:       msg,
 			MessageLogged: messageLogged,
 		})
 	})
@@ -505,8 +505,8 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 		defer os.Remove(tmpFile)
 
 		// Send the message
-		success, message := sendWhatsAppDocumentMessage(client, recipient, message, fileBytes, fileName, mimeType)
-		fmt.Println("Message sent", success, message)
+		success, msg := sendWhatsAppDocumentMessage(client, recipient, message, fileBytes, fileName, mimeType)
+		fmt.Println("Message sent", success, msg)
 
 		var messageLogged string
 		// Log the message
@@ -533,7 +533,7 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 
 		json.NewEncoder(w).Encode(SendMessageResponseWithLog{
 			Success:       success,
-			Message:       message,
+			Message:       msg,
 			MessageLogged: messageLogged,
 		})
 	})
