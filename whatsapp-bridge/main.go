@@ -417,6 +417,8 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 		}
 
 		file, _, err := r.FormFile("file")
+		// fileName := header.Filename
+		// mimeType := header.Header.Get("Content-Type")
 		if err != nil {
 			fmt.Println("Error retrieving file:", err)
 			http.Error(w, "Error retrieving file", http.StatusBadRequest)
@@ -442,9 +444,36 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 			return
 		}
 
+		// Save the file temporarily
+		tmpFile := fmt.Sprintf("store/image_%d.jpg", time.Now().UnixNano())
+		err = os.WriteFile(tmpFile, fileBytes, 0644)
+		if err != nil {
+			fmt.Println("Error saving file:", err)
+			http.Error(w, "Error saving file", http.StatusInternalServerError)
+			return
+		}
+		defer os.Remove(tmpFile)
+
 		// Send the message
-		success, message := sendWhatsAppImageMessage(client, recipient, message, fileBytes)
-		fmt.Println("Message sent", success, message)
+		success, msg := sendWhatsAppImageMessage(client, recipient, message, fileBytes)
+		fmt.Println("Message sent", success, msg)
+
+		var messageLogged string
+		// Log the message
+		if success {
+			senderPhone := client.Store.ID.User
+			recipientPhone := recipient
+			msgTime := time.Now()
+			err := logImageMessage(senderPhone, message, recipientPhone, tmpFile, msgTime)
+			if err != nil {
+				fmt.Println("⚠️ Failed to log message:", err)
+				messageLogged = "Failed to log message"
+			} else {
+				fmt.Println("✅ Message logged successfully")
+				messageLogged = "Message logged successfully"
+			}
+		}
+
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
 
@@ -454,9 +483,10 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 		}
 
 		// Send response
-		json.NewEncoder(w).Encode(SendMessageResponse{
-			Success: success,
-			Message: message,
+		json.NewEncoder(w).Encode(SendMessageResponseWithLog{
+			Success:       success,
+			Message:       msg,
+			MessageLogged: messageLogged,
 		})
 	})
 
