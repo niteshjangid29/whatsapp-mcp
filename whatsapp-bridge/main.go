@@ -47,6 +47,22 @@ type MessageStore struct {
 	db *sql.DB
 }
 
+type CreateGroupRequest struct {
+	GroupName string   `json:"group_name"`
+	Members   []string `json:"members"`
+}
+
+type CreateGroupResponse struct {
+	Success  bool   `json:"success"`
+	GroupJID string `json:"group_jid"`
+	Message  string `json:"message"`
+}
+
+type GroupInfo struct {
+	Name string `json:"name"`
+	JID  string `json:"jid"`
+}
+
 // Initialize message store
 func NewMessageStore() (*MessageStore, error) {
 	// Create directory for database if it doesn't exist
@@ -218,10 +234,14 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			return false, fmt.Sprintf("Error parsing JID: %v", err)
 		}
 	} else {
-		// Create JID from phone number
+		server := "s.whatsapp.net" // Default server for personal chats
+		if strings.Contains(recipient, "-") {
+			server = "g.us" // Group chats use g.us
+		}
+
 		recipientJID = types.JID{
 			User:   recipient,
-			Server: "s.whatsapp.net", // For personal chats
+			Server: server,
 		}
 	}
 
@@ -256,10 +276,14 @@ func sendWhatsAppImageMessage(client *whatsmeow.Client, recipient string, messag
 			return false, fmt.Sprintf("Error parsing JID: %v", err)
 		}
 	} else {
+		server := "s.whatsapp.net" // Default server for personal chats
+		if strings.Contains(recipient, "-") {
+			server = "g.us" // Group chats use g.us
+		}
 		// Create JID from phone number
 		recipientJID = types.JID{
 			User:   recipient,
-			Server: "s.whatsapp.net", // For personal chats
+			Server: server,
 		}
 	}
 
@@ -311,10 +335,14 @@ func sendWhatsAppDocumentMessage(client *whatsmeow.Client, recipient string, mes
 			return false, fmt.Sprintf("Error parsing JID: %v", err)
 		}
 	} else {
+		server := "s.whatsapp.net" // Default server for personal chats
+		if strings.Contains(recipient, "-") {
+			server = "g.us" // Group chats use g.us
+		}
 		// Create JID from phone number
 		recipientJID = types.JID{
 			User:   recipient,
-			Server: "s.whatsapp.net", // For personal chats
+			Server: server,
 		}
 	}
 
@@ -347,8 +375,109 @@ func sendWhatsAppDocumentMessage(client *whatsmeow.Client, recipient string, mes
 	return true, fmt.Sprintf("Document message sent to %s", recipient)
 }
 
+func createWhatsAppGroup(client *whatsmeow.Client, req CreateGroupRequest) (CreateGroupResponse, error) {
+	if !client.IsConnected() {
+		return CreateGroupResponse{
+			Success: false,
+			Message: "Not connected to WhatsApp",
+		}, nil
+	}
+
+	if strings.TrimSpace(req.GroupName) == "" || len(req.Members) < 1 {
+		return CreateGroupResponse{
+			Success: false,
+			Message: "Group name and at least one member are required",
+		}, nil
+	}
+
+	if len(req.GroupName) > 25 {
+		return CreateGroupResponse{
+			Success: false,
+			Message: "Group name exceeds 25 character limit",
+		}, nil
+	}
+
+	var memberJIDs []types.JID
+	for _, member := range req.Members {
+		member = strings.TrimSpace(member)
+		if member == "" {
+			continue
+		}
+
+		var memberJID types.JID
+		var err error
+		if strings.Contains(member, "@") {
+			memberJID, err = types.ParseJID(member)
+			if err != nil {
+				return CreateGroupResponse{
+					Success: false,
+					Message: fmt.Sprintf("Invalid JID '%s': %v", member, err),
+				}, nil
+			}
+		} else {
+			member = strings.NewReplacer("+", "", "-", "", " ", "").Replace(member)
+			memberJID = types.NewJID(member, types.DefaultUserServer)
+		}
+		memberJIDs = append(memberJIDs, memberJID)
+	}
+
+	createReq := whatsmeow.ReqCreateGroup{
+		Name:         req.GroupName,
+		Participants: memberJIDs,
+		CreateKey:    client.GenerateMessageID(),
+	}
+
+	groupInfo, err := client.CreateGroup(createReq)
+	if err != nil {
+		return CreateGroupResponse{
+			Success: false,
+			Message: fmt.Sprintf("Error creating group: %v", err),
+		}, nil
+	}
+
+	return CreateGroupResponse{
+		Success:  true,
+		GroupJID: groupInfo.JID.String(),
+		Message:  "Group created successfully",
+	}, nil
+}
+
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, port int) {
+	// Handler for creating a group
+	http.HandleFunc("/api/create-group", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("Received request to create group")
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse JSON body
+		var req CreateGroupRequest
+		decoder := json.NewDecoder(r.Body)
+		err := decoder.Decode(&req)
+		if err != nil {
+			http.Error(w, "Invalid request payload", http.StatusBadRequest)
+			return
+		}
+
+		// Call createWhatsAppGroup function
+		resp, err := createWhatsAppGroup(client, req)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to create group: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Set response header and write JSON response
+		w.Header().Set("Content-Type", "application/json")
+		if resp.Success {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
@@ -566,6 +695,37 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 			Message:       msg,
 			MessageLogged: messageLogged,
 		})
+	})
+
+	http.HandleFunc("/api/groups", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("Received request for group info")
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if !client.IsConnected() {
+			http.Error(w, "Not connected to WhatsApp", http.StatusInternalServerError)
+			return
+		}
+
+		// Get all groups
+		groups, err := client.GetJoinedGroups()
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get groups: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		var groupList []GroupInfo
+		for _, group := range groups {
+			groupList = append(groupList, GroupInfo{
+				Name: group.Name,
+				JID:  group.JID.String(),
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(groupList)
 	})
 
 	// Start the server
@@ -799,13 +959,30 @@ func main() {
 		switch v := evt.(type) {
 		case *events.Message:
 			// Process regular messages
+			var sender, recipient string
 			handleMessage(client, messageStore, v, logger)
-			sender := v.Info.Sender.User
+			// Is this message from me?
+			if v.Info.MessageSource.IsFromMe {
+				sender = client.Store.ID.User
+				recipient = v.Info.Chat.User
+			} else {
+				// Check if it's a group chat
+				if v.Info.Chat.Server == "g.us" {
+					// Group message
+					sender = v.Info.Sender.User      // actual sender inside the group
+					recipient = v.Info.Chat.String() // full group JID
+				} else {
+					// Personal chat
+					sender = v.Info.Chat.User
+					recipient = client.Store.ID.User
+				}
+			}
 			timestamp := v.Info.Timestamp
 			text := v.Message.GetConversation()
-			recipient := v.Info.Chat.User
 			image := v.Message.ImageMessage
 			document := v.Message.DocumentMessage
+
+			// fmt.Println("Received message:", text, "from", sender, "to", recipient)
 
 			// Do not save status messages
 			if sender == "status" || recipient == "status" || sender == "status@broadcast" || recipient == "status@broadcast" {
