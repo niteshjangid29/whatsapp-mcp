@@ -409,7 +409,7 @@ func createWhatsAppGroup(client *whatsmeow.Client, req CreateGroupRequest) (Crea
 		}, nil
 	}
 
-	if strings.TrimSpace(req.GroupName) == "" || len(req.Members) < 1 {
+	if strings.TrimSpace(req.GroupName) == "" || len(req.Members) == 0 {
 		return CreateGroupResponse{
 			Success: false,
 			Message: "Group name and at least one member are required",
@@ -477,25 +477,25 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		defer r.Body.Close()
 
 		// Parse JSON body
 		var req CreateGroupRequest
 		decoder := json.NewDecoder(r.Body)
-		err := decoder.Decode(&req)
-		if err != nil {
-			http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		if err := decoder.Decode(&req); err != nil {
+			http.Error(w, "Invalid request payload: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		// Call createWhatsAppGroup function
 		resp, err := createWhatsAppGroup(client, req)
+		w.Header().Set("Content-Type", "application/json")
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Failed to create group: %v", err), http.StatusInternalServerError)
 			return
 		}
 
 		// Set response header and write JSON response
-		w.Header().Set("Content-Type", "application/json")
 		if resp.Success {
 			w.WriteHeader(http.StatusOK)
 		} else {
