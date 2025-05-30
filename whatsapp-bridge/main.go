@@ -7,20 +7,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
-	"mime/multipart"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	logfunction "whatsapp-client/log-function"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
@@ -59,8 +60,33 @@ type CreateGroupResponse struct {
 }
 
 type GroupInfo struct {
-	Name string `json:"name"`
-	JID  string `json:"jid"`
+	Name        string `json:"name"`
+	JID         string `json:"jid"`
+	CreatedTime int64  `json:"created_time"`
+}
+
+func uploadToS3(bucketName string, key string, data []byte) (string, error) {
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(os.Getenv("AWS_REGION")))
+	if err != nil {
+		return "", err
+	}
+
+	s3Client := s3.NewFromConfig(cfg)
+
+	contentType := http.DetectContentType(data)
+
+	_, err = s3Client.PutObject(context.TODO(), &s3.PutObjectInput{
+		Bucket:      aws.String(bucketName),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(data),
+		ContentType: aws.String(contentType),
+	})
+	if err != nil {
+		return "", err
+	}
+
+	url := "https://" + bucketName + ".s3." + os.Getenv("AWS_REGION") + ".amazonaws.com/" + key
+	return url, nil
 }
 
 // Initialize message store
@@ -512,7 +538,7 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 			senderPhone := client.Store.ID.User
 			recipientPhone := req.Recipient
 			msgTime := time.Now()
-			err := logMessage(senderPhone, req.Message, recipientPhone, msgTime)
+			err := logfunction.LogMessage(senderPhone, req.Message, recipientPhone, msgTime)
 			if err != nil {
 				fmt.Println("⚠️ Failed to log message:", err)
 				messageLogged = "Failed to log message"
@@ -593,7 +619,7 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 			senderPhone := client.Store.ID.User
 			recipientPhone := recipient
 			msgTime := time.Now()
-			err := logImageMessage(senderPhone, message, recipientPhone, tmpFile, msgTime)
+			err := logfunction.LogImageMessage(senderPhone, message, recipientPhone, tmpFile, msgTime)
 			if err != nil {
 				fmt.Println("⚠️ Failed to log message:", err)
 				messageLogged = "Failed to log message"
@@ -673,7 +699,7 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 			senderPhone := client.Store.ID.User
 			recipientPhone := recipient
 			msgTime := time.Now()
-			err := logDocumentMessage(senderPhone, message, recipientPhone, tmpFile, msgTime)
+			err := logfunction.LogDocumentMessage(senderPhone, message, recipientPhone, tmpFile, msgTime)
 			if err != nil {
 				fmt.Println("⚠️ Failed to log message:", err)
 				messageLogged = "Failed to log message"
@@ -719,8 +745,9 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 		var groupList []GroupInfo
 		for _, group := range groups {
 			groupList = append(groupList, GroupInfo{
-				Name: group.Name,
-				JID:  group.JID.String(),
+				Name:        group.Name,
+				JID:         group.JID.String(),
+				CreatedTime: group.GroupCreated.UnixMilli(),
 			})
 		}
 
@@ -742,171 +769,317 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 
 const LogAPIEndpoint = "https://backend.railse.com/whatsapp/log-message"
 
-func logMessage(senderPhone string, text string, recipientPhone string, messageTime time.Time) error {
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
+// func logMessage(senderPhone string, text string, recipientPhone string, messageTime time.Time) error {
+// 	body := &bytes.Buffer{}
+// 	writer := multipart.NewWriter(body)
 
-	// load .env file
-	err := godotenv.Load()
+// 	// load .env file
+// 	err := godotenv.Load()
+// 	if err != nil {
+// 		log.Fatal("Error loading .env file")
+// 	}
+// 	// get BEARER_TOKEN from .env file
+// 	bearerToken := os.Getenv("BEARER_TOKEN")
+// 	if bearerToken == "" {
+// 		log.Fatal("BEARER_TOKEN not set in .env file")
+// 	}
+
+// 	_ = writer.WriteField("entity_phone_number_from", senderPhone)
+// 	_ = writer.WriteField("entity_phone_number_to", recipientPhone)
+// 	_ = writer.WriteField("message_text", text)
+// 	_ = writer.WriteField("message_status", "READ")
+// 	_ = writer.WriteField("message_time", strconv.FormatInt(messageTime.UnixMilli(), 10))
+
+// 	writer.Close()
+
+// 	req, err := http.NewRequest("POST", LogAPIEndpoint, body)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	req.Header.Set("Content-Type", writer.FormDataContentType())
+// 	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+// 	log.Println("📤 REQUEST", req)
+
+// 	client := &http.Client{}
+// 	resp, err := client.Do(req)
+// 	if err != nil {
+// 		log.Println("❌ Error sending log:", err)
+// 		return err
+// 	}
+// 	defer resp.Body.Close()
+
+// 	return nil
+// }
+
+type WALogMessageForQueue struct {
+	Type    string    `json:"type"` // "text", "image", "document"
+	From    string    `json:"from"`
+	To      string    `json:"to"`
+	Message string    `json:"message"`
+	File    string    `json:"file"`
+	Time    time.Time `json:"time"`
+}
+
+func sendMessageToQueue(message WALogMessageForQueue, sqsClient *sqs.Client, queueUrl string) error {
+	messageBytes, err := json.Marshal(message)
 	if err != nil {
-		log.Fatal("Error loading .env file")
-	}
-	// get BEARER_TOKEN from .env file
-	bearerToken := os.Getenv("BEARER_TOKEN")
-	if bearerToken == "" {
-		log.Fatal("BEARER_TOKEN not set in .env file")
+		return fmt.Errorf("error marshalling message: %w", err)
 	}
 
-	_ = writer.WriteField("entity_phone_number_from", senderPhone)
-	_ = writer.WriteField("entity_phone_number_to", recipientPhone)
-	_ = writer.WriteField("message_text", text)
-	_ = writer.WriteField("message_status", "READ")
-	_ = writer.WriteField("message_time", strconv.FormatInt(messageTime.UnixMilli(), 10))
-
-	writer.Close()
-
-	req, err := http.NewRequest("POST", LogAPIEndpoint, body)
+	_, err = sqsClient.SendMessage(context.Background(), &sqs.SendMessageInput{
+		QueueUrl:    aws.String(queueUrl),
+		MessageBody: aws.String(string(messageBytes)),
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("error sending message to SQS: %w", err)
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+bearerToken)
+	fmt.Println("✅ Message sent to SQS queue successfully")
+	return nil
+}
 
-	log.Println("📤 REQUEST", req)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
+func recieveMessagesFromQueue(sqsClient *sqs.Client, queueUrl string) error {
+	output, err := sqsClient.ReceiveMessage(context.Background(), &sqs.ReceiveMessageInput{
+		QueueUrl:            aws.String(queueUrl),
+		MaxNumberOfMessages: 10,
+		WaitTimeSeconds:     5,
+	})
 	if err != nil {
-		log.Println("❌ Error sending log:", err)
-		return err
+		return fmt.Errorf("error receiving message from SQS: %w", err)
 	}
-	defer resp.Body.Close()
+
+	if len(output.Messages) == 0 {
+		fmt.Println("No messages in the queue")
+		return nil
+	}
+
+	for _, msg := range output.Messages {
+		var message WALogMessageForQueue
+		err := json.Unmarshal([]byte(*msg.Body), &message)
+		if err != nil {
+			fmt.Println("❌ Error unmarshalling message:", err)
+			continue
+		}
+		if message.Type == "text" {
+			if err := logfunction.LogMessage(message.From, message.Message, message.To, message.Time); err != nil {
+				fmt.Println("❌ Error logging message:", err)
+			}
+		}
+
+		if message.Type == "image" {
+			if err := logfunction.LogImageMessageSQS(message.From, message.Message, message.To, message.File, message.Time); err != nil {
+				fmt.Println("❌ Error logging image message:", err)
+			}
+		}
+
+		if message.Type == "document" {
+			if err := logfunction.LogDocumentMessageSQS(message.From, message.Message, message.To, message.File, message.Time); err != nil {
+				fmt.Println("❌ Error logging document message:", err)
+			}
+		}
+
+		// Delete from queue
+		_, err = sqsClient.DeleteMessage(context.Background(), &sqs.DeleteMessageInput{
+			QueueUrl:      aws.String(queueUrl),
+			ReceiptHandle: msg.ReceiptHandle,
+		})
+		if err != nil {
+			fmt.Println("❌ Error deleting message from SQS:", err)
+		}
+		fmt.Println("✅ Message processed and deleted from SQS:", message.Message)
+	}
 
 	return nil
 }
 
-func logImageMessage(senderPhone string, text string, recipientPhone string, filePath string, messageTime time.Time) error {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
+// func logImageMessage(senderPhone string, text string, recipientPhone string, filePath string, messageTime time.Time) error {
+// 	err := godotenv.Load()
+// 	if err != nil {
+// 		log.Fatal("Error loading .env file")
+// 	}
+// 	bearerToken := os.Getenv("BEARER_TOKEN")
+// 	if bearerToken == "" {
+// 		log.Fatal("BEARER_TOKEN not set in .env file")
+// 	}
+
+// 	// file, err := os.Open(filePath)
+// 	// if err != nil {
+// 	// 	log.Println("❌ Error opening file:", err)
+// 	// 	return err
+// 	// }
+// 	// defer file.Close()
+
+// 	resp, err := http.Get(filePath)
+// 	if err != nil {
+// 		log.Println("❌ Error fetching file:", err)
+// 		return err
+// 	}
+// 	defer resp.Body.Close()
+
+// 	body := &bytes.Buffer{}
+// 	writer := multipart.NewWriter(body)
+
+// 	_ = writer.WriteField("entity_phone_number_from", senderPhone)
+// 	_ = writer.WriteField("entity_phone_number_to", recipientPhone)
+// 	_ = writer.WriteField("message_text", text)
+// 	_ = writer.WriteField("message_status", "READ")
+// 	_ = writer.WriteField("message_time", strconv.FormatInt(messageTime.UnixMilli(), 10))
+
+// 	part, err := writer.CreateFormFile("files", filepath.Base(filePath))
+// 	if err != nil {
+// 		log.Println("❌ Error creating form file:", err)
+// 		return err
+// 	}
+
+// 	_, err = io.Copy(part, resp.Body)
+// 	if err != nil {
+// 		log.Println("❌ Error copying file data:", err)
+// 		return err
+// 	}
+
+// 	writer.Close()
+
+// 	req, err := http.NewRequest("POST", LogAPIEndpoint, body)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	req.Header.Set("Content-Type", writer.FormDataContentType())
+// 	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+// 	// log.Println("📤 Image REQUEST", req)
+
+// 	clientHTTP := &http.Client{}
+// 	apiResp, err := clientHTTP.Do(req)
+// 	if err != nil {
+// 		log.Println("❌ Error sending log:", err)
+// 		return err
+// 	}
+// 	defer apiResp.Body.Close()
+
+// 	log.Println("✅ Image message logged successfully")
+// 	return nil
+// }
+
+// func logDocumentMessage(senderPhone string, text string, recipientPhone string, filePath string, messageTime time.Time) error {
+// 	err := godotenv.Load()
+// 	if err != nil {
+// 		log.Fatal("Error loading .env file")
+// 	}
+// 	bearerToken := os.Getenv("BEARER_TOKEN")
+// 	if bearerToken == "" {
+// 		log.Fatal("BEARER_TOKEN not set in .env file")
+// 	}
+
+// 	// file, err := os.Open(filePath)
+// 	// if err != nil {
+// 	// 	log.Println("❌ Error opening file:", err)
+// 	// 	return err
+// 	// }
+// 	// defer file.Close()
+
+// 	resp, err := http.Get(filePath)
+// 	if err != nil {
+// 		log.Println("❌ Error fetching file:", err)
+// 		return err
+// 	}
+// 	defer resp.Body.Close()
+
+// 	body := &bytes.Buffer{}
+// 	writer := multipart.NewWriter(body)
+
+// 	_ = writer.WriteField("entity_phone_number_from", senderPhone)
+// 	_ = writer.WriteField("entity_phone_number_to", recipientPhone)
+// 	_ = writer.WriteField("message_text", text)
+// 	_ = writer.WriteField("message_status", "READ")
+// 	_ = writer.WriteField("message_time", strconv.FormatInt(messageTime.UnixMilli(), 10))
+
+// 	part, err := writer.CreateFormFile("files", filepath.Base(filePath))
+// 	if err != nil {
+// 		log.Println("❌ Error creating form file:", err)
+// 		return err
+// 	}
+
+// 	_, err = io.Copy(part, resp.Body)
+// 	if err != nil {
+// 		log.Println("❌ Error copying file data:", err)
+// 		return err
+// 	}
+
+// 	writer.Close()
+
+// 	req, err := http.NewRequest("POST", LogAPIEndpoint, body)
+// 	if err != nil {
+// 		log.Println("❌ Error creating request:", err)
+// 		return err
+// 	}
+// 	req.Header.Set("Content-Type", writer.FormDataContentType())
+// 	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+// 	// log.Println("📤 Document REQUEST", req)
+
+// 	clientHTTP := &http.Client{}
+// 	apiResp, err := clientHTTP.Do(req)
+// 	if err != nil {
+// 		log.Println("❌ Error sending log:", err)
+// 		return err
+// 	}
+// 	defer apiResp.Body.Close()
+
+// 	log.Println("✅ Document message logged successfully")
+// 	return nil
+// }
+
+var awsConfig *aws.Config
+
+func getConfig() *aws.Config {
+	if awsConfig == nil {
+		cfg, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(os.Getenv("AWS_REGION")))
+		if err != nil {
+			fmt.Println("Error loading AWS config:", err)
+			return nil
+		}
+		awsConfig = &cfg
 	}
-	bearerToken := os.Getenv("BEARER_TOKEN")
-	if bearerToken == "" {
-		log.Fatal("BEARER_TOKEN not set in .env file")
-	}
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		log.Println("❌ Error opening file:", err)
-		return err
-	}
-	defer file.Close()
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-
-	_ = writer.WriteField("entity_phone_number_from", senderPhone)
-	_ = writer.WriteField("entity_phone_number_to", recipientPhone)
-	_ = writer.WriteField("message_text", text)
-	_ = writer.WriteField("message_status", "READ")
-	_ = writer.WriteField("message_time", strconv.FormatInt(messageTime.UnixMilli(), 10))
-
-	part, err := writer.CreateFormFile("files", filepath.Base(filePath))
-	if err != nil {
-		log.Println("❌ Error creating form file:", err)
-		return err
-	}
-
-	_, err = io.Copy(part, file)
-	if err != nil {
-		log.Println("❌ Error copying file data:", err)
-		return err
-	}
-
-	writer.Close()
-
-	req, err := http.NewRequest("POST", LogAPIEndpoint, body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+bearerToken)
-
-	log.Println("📤 Image REQUEST", req)
-
-	clientHTTP := &http.Client{}
-	resp, err := clientHTTP.Do(req)
-	if err != nil {
-		log.Println("❌ Error sending log:", err)
-		return err
-	}
-	defer resp.Body.Close()
-
-	log.Println("✅ Image message logged successfully")
-	return nil
-}
-
-func logDocumentMessage(senderPhone string, text string, recipientPhone string, filePath string, messageTime time.Time) error {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
-	}
-	bearerToken := os.Getenv("BEARER_TOKEN")
-	if bearerToken == "" {
-		log.Fatal("BEARER_TOKEN not set in .env file")
-	}
-	file, err := os.Open(filePath)
-	if err != nil {
-		log.Println("❌ Error opening file:", err)
-		return err
-	}
-	defer file.Close()
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-
-	_ = writer.WriteField("entity_phone_number_from", senderPhone)
-	_ = writer.WriteField("entity_phone_number_to", recipientPhone)
-	_ = writer.WriteField("message_text", text)
-	_ = writer.WriteField("message_status", "READ")
-	_ = writer.WriteField("message_time", strconv.FormatInt(messageTime.UnixMilli(), 10))
-	part, err := writer.CreateFormFile("files", filepath.Base(filePath))
-	if err != nil {
-		log.Println("❌ Error creating form file:", err)
-		return err
-	}
-
-	_, err = io.Copy(part, file)
-	if err != nil {
-		log.Println("❌ Error copying file data:", err)
-		return err
-	}
-
-	writer.Close()
-
-	req, err := http.NewRequest("POST", LogAPIEndpoint, body)
-	if err != nil {
-		log.Println("❌ Error creating request:", err)
-		return err
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+bearerToken)
-
-	log.Println("📤 Document REQUEST", req)
-
-	clientHTTP := &http.Client{}
-	resp, err := clientHTTP.Do(req)
-	if err != nil {
-		log.Println("❌ Error sending log:", err)
-		return err
-	}
-	defer resp.Body.Close()
-
-	log.Println("✅ Document message logged successfully")
-	return nil
+	return awsConfig
 }
 
 func main() {
+	// c := cron.New()
+
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Error loading .env file")
+		return
+	}
+
+	ctx := context.Background()
+	sqsClient := sqs.NewFromConfig(*getConfig())
+
+	// Get Queue URL
+	result, err := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
+		QueueName: aws.String(os.Getenv("AWS_SQS_QUEUE_NAME")),
+	})
+	if err != nil {
+		fmt.Println("Error getting SQS queue URL:", err)
+		return
+	}
+	fmt.Println("SQS Queue URL:", *result.QueueUrl)
+
+	// Crone job
+	// Start SQS polling in a separate goroutine
+	go func() {
+		for {
+			err = recieveMessagesFromQueue(sqsClient, *result.QueueUrl)
+			if err != nil {
+				fmt.Println("❌ Error receiving message from SQS:", err)
+			} else {
+				fmt.Println("✅ Successfully received message from SQS")
+			}
+			fmt.Println("-------------Cron job executed-------------")
+			time.Sleep(10 * time.Second) // Sleep for 10 seconds before next iteration
+		}
+	}()
+
 	// Set up logger
 	logger := waLog.Stdout("Client", "DEBUG", true)
 	logger.Infof("Starting WhatsApp client...")
@@ -961,28 +1134,29 @@ func main() {
 			// Process regular messages
 			var sender, recipient string
 			handleMessage(client, messageStore, v, logger)
-			// Is this message from me?
-			if v.Info.MessageSource.IsFromMe {
-				sender = client.Store.ID.User
-				recipient = v.Info.Chat.User
+
+			// Is group message?
+			if v.Info.Chat.Server == "g.us" {
+				sender = v.Info.Sender.User      // actual sender inside the group
+				recipient = v.Info.Chat.String() // full group JID
 			} else {
-				// Check if it's a group chat
-				if v.Info.Chat.Server == "g.us" {
-					// Group message
-					sender = v.Info.Sender.User      // actual sender inside the group
-					recipient = v.Info.Chat.String() // full group JID
+				if v.Info.MessageSource.IsFromMe {
+					// Message from me
+					sender = client.Store.ID.User
+					recipient = v.Info.Chat.User
 				} else {
-					// Personal chat
+					// Message to me
 					sender = v.Info.Chat.User
 					recipient = client.Store.ID.User
 				}
 			}
+
 			timestamp := v.Info.Timestamp
 			text := v.Message.GetConversation()
 			image := v.Message.ImageMessage
 			document := v.Message.DocumentMessage
 
-			// fmt.Println("Received message:", text, "from", sender, "to", recipient)
+			fmt.Println("Received message:", text, "from", sender, "to", recipient)
 
 			// Do not save status messages
 			if sender == "status" || recipient == "status" || sender == "status@broadcast" || recipient == "status@broadcast" {
@@ -999,27 +1173,45 @@ func main() {
 
 				// Save document temporarily
 				tmpFile := fmt.Sprintf("store/document_%d.pdf", time.Now().UnixNano())
-				err = os.WriteFile(tmpFile, data, 0644)
+				// err = os.WriteFile(tmpFile, data, 0644)
+				// if err != nil {
+				// 	logger.Errorf("❌ Failed to save document: %v", err)
+				// 	return
+				// }
+				// defer os.Remove(tmpFile)
+
+				// upload to s3
+				url, err := uploadToS3(os.Getenv("AWS_S3_BUCKET_NAME"), tmpFile, data)
 				if err != nil {
-					logger.Errorf("❌ Failed to save document: %v", err)
+					logger.Errorf("❌ Failed to upload document to S3: %v", err)
 					return
 				}
-				defer os.Remove(tmpFile)
-
-				sender := v.Info.Sender.User
-				recipient := v.Info.Chat.User
 				timestamp := v.Info.Timestamp
 				caption := ""
 				if v.Message.DocumentMessage.Caption != nil {
 					caption = *v.Message.DocumentMessage.Caption
 				}
-				err = logDocumentMessage(sender, caption, recipient, tmpFile, timestamp)
+				// err = logDocumentMessage(sender, caption, recipient, tmpFile, timestamp)
+				// if err != nil {
+				// 	logger.Errorf("❌ Failed to log document message: %v", err)
+				// } else {
+				// 	logger.Infof("✅ Document message logged successfully")
+				// }
+
+				err = sendMessageToQueue(WALogMessageForQueue{
+					Type:    "document",
+					From:    sender,
+					To:      recipient,
+					Message: caption,
+					Time:    timestamp,
+					File:    url,
+				}, sqsClient, *result.QueueUrl)
 				if err != nil {
-					logger.Errorf("❌ Failed to log document message: %v", err)
+					logger.Errorf("❌ Failed to send document message to SQS: %v", err)
+					return
 				} else {
-					logger.Infof("✅ Document message logged successfully")
+					logger.Infof("✅ Document message sent to SQS queue successfully")
 				}
-				fmt.Printf("📥 Received document from %s to %s: %s\n", sender, recipient, caption)
 			}
 
 			if image != nil {
@@ -1029,38 +1221,72 @@ func main() {
 					return
 				}
 
-				// Save image temporarily
+				// // Save image temporarily
 				tmpFile := fmt.Sprintf("store/image_%d.jpg", time.Now().UnixNano())
-				err = os.WriteFile(tmpFile, data, 0644)
+				// err = os.WriteFile(tmpFile, data, 0644)
+				// if err != nil {
+				// 	logger.Errorf("❌ Failed to save image: %v", err)
+				// 	return
+				// }
+				// defer os.Remove(tmpFile)
+
+				// upload to s3
+				url, err := uploadToS3(os.Getenv("AWS_S3_BUCKET_NAME"), tmpFile, data)
+				// log.Println("URL = ", url)
 				if err != nil {
-					logger.Errorf("❌ Failed to save image: %v", err)
+					logger.Errorf("❌ Failed to upload image to S3: %v", err)
 					return
 				}
-				defer os.Remove(tmpFile)
 
-				sender := v.Info.Sender.User
-				recipient := v.Info.Chat.User
 				timestamp := v.Info.Timestamp
 				caption := ""
 				if v.Message.ImageMessage.Caption != nil {
 					caption = *v.Message.ImageMessage.Caption
 				}
-				err = logImageMessage(sender, caption, recipient, tmpFile, timestamp)
+				// err = logImageMessage(sender, caption, recipient, url, timestamp)
+				// if err != nil {
+				// 	logger.Errorf("❌ Failed to log image message: %v", err)
+				// } else {
+				// 	logger.Infof("✅ Image message logged successfully")
+				// }
+
+				err = sendMessageToQueue(WALogMessageForQueue{
+					Type:    "image",
+					From:    sender,
+					To:      recipient,
+					Message: caption,
+					Time:    timestamp,
+					File:    url,
+				}, sqsClient, *result.QueueUrl)
 				if err != nil {
-					logger.Errorf("❌ Failed to log image message: %v", err)
+					logger.Errorf("❌ Failed to send image message to SQS: %v", err)
 				} else {
-					logger.Infof("✅ Image message logged successfully")
+					logger.Infof("✅ Image message sent to SQS queue successfully")
 				}
-				fmt.Printf("📥 Received image from %s to %s: %s\n", sender, recipient, caption)
 			}
 
 			if text != "" {
 				fmt.Printf("📥 Received from %s to %s: %s\n", sender, recipient, text)
-				err := logMessage(sender, text, recipient, timestamp)
+				// err := logMessage(sender, text, recipient, timestamp)
+				// if err != nil {
+				// 	logger.Errorf("❌ Failed to log message: %v", err)
+				// } else {
+				// 	logger.Infof("✅ Message logged successfully")
+				// }
+
+				// Send message to SQS queue
+				err = sendMessageToQueue(WALogMessageForQueue{
+					Type:    "text",
+					From:    sender,
+					To:      recipient,
+					Message: text,
+					Time:    timestamp,
+					File:    "",
+				}, sqsClient, *result.QueueUrl)
 				if err != nil {
-					logger.Errorf("❌ Failed to log message: %v", err)
+					logger.Errorf("❌ Failed to send message to SQS: %v", err)
 				} else {
-					logger.Infof("✅ Message logged successfully")
+					logger.Infof("✅ Message sent to SQS queue successfully")
 				}
 			}
 
