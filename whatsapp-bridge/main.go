@@ -16,6 +16,7 @@ import (
 	"time"
 	logfunction "whatsapp-client/log-function"
 
+	"go.mau.fi/libsignal/logger"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -235,9 +236,8 @@ type SendMessageRequest struct {
 }
 
 type SendMessageResponseWithLog struct {
-	Success       bool   `json:"success"`
-	Message       string `json:"message"`
-	MessageLogged string `json:"message_logged"`
+	Success bool   `json:"success"`
+	Message string `json:"message"`
 }
 
 // Function to send a WhatsApp message
@@ -469,7 +469,7 @@ func createWhatsAppGroup(client *whatsmeow.Client, req CreateGroupRequest) (Crea
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
-func startRESTServer(client *whatsmeow.Client, port int) {
+func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL string, port int) {
 	// Handler for creating a group
 	http.HandleFunc("/api/create-group", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("Received request to create group")
@@ -532,20 +532,33 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 		success, msg := sendWhatsAppMessage(client, req.Recipient, req.Message)
 		fmt.Println("Message sent", success, msg)
 
-		var messageLogged string
 		// Log the message
 		if success {
 			senderPhone := client.Store.ID.User
 			recipientPhone := req.Recipient
 			msgTime := time.Now()
-			err := logfunction.LogMessage(senderPhone, req.Message, recipientPhone, msgTime)
+			// err := logfunction.LogMessage(senderPhone, req.Message, recipientPhone, msgTime)
+			// if err != nil {
+			// 	fmt.Println("⚠️ Failed to log message:", err)
+			// 	messageLogged = "Failed to log message"
+			// } else {
+			// 	fmt.Println("✅ Message logged successfully")
+			// 	messageLogged = "Message logged successfully"
+			// }
+			err := sendMessageToQueue(WALogMessageForQueue{
+				Type:    "text",
+				From:    senderPhone,
+				To:      recipientPhone,
+				Message: req.Message,
+				File:    "",
+				Time:    msgTime,
+			}, sqsClient, queueURL)
 			if err != nil {
-				fmt.Println("⚠️ Failed to log message:", err)
-				messageLogged = "Failed to log message"
+				logger.Error("Failed to send message to SQS:", err)
 			} else {
-				fmt.Println("✅ Message logged successfully")
-				messageLogged = "Message logged successfully"
+				logger.Info("Message sent to SQS successfully")
 			}
+
 		}
 
 		// Set response headers
@@ -558,9 +571,8 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 
 		// Send response
 		json.NewEncoder(w).Encode(SendMessageResponseWithLog{
-			Success:       success,
-			Message:       msg,
-			MessageLogged: messageLogged,
+			Success: success,
+			Message: msg,
 		})
 	})
 
@@ -600,32 +612,53 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 		}
 
 		// Save the file temporarily
-		tmpFile := fmt.Sprintf("store/image_%d.jpg", time.Now().UnixNano())
-		err = os.WriteFile(tmpFile, fileBytes, 0644)
-		if err != nil {
-			fmt.Println("Error saving file:", err)
-			http.Error(w, "Error saving file", http.StatusInternalServerError)
-			return
-		}
-		defer os.Remove(tmpFile)
+		// tmpFile := fmt.Sprintf("whatsapp_failed_files/image_%d.jpg", time.Now().UnixNano())
+		// err = os.WriteFile(tmpFile, fileBytes, 0644)
+		// if err != nil {
+		// 	fmt.Println("Error saving file:", err)
+		// 	http.Error(w, "Error saving file", http.StatusInternalServerError)
+		// 	return
+		// }
+		// defer os.Remove(tmpFile)
 
 		// Send the message
 		success, msg := sendWhatsAppImageMessage(client, recipient, message, fileBytes)
 		fmt.Println("Message sent", success, msg)
 
-		var messageLogged string
 		// Log the message
 		if success {
 			senderPhone := client.Store.ID.User
 			recipientPhone := recipient
 			msgTime := time.Now()
-			err := logfunction.LogImageMessage(senderPhone, message, recipientPhone, tmpFile, msgTime)
+			// err := logfunction.LogImageMessage(senderPhone, message, recipientPhone, tmpFile, msgTime)
+			// if err != nil {
+			// 	fmt.Println("⚠️ Failed to log message:", err)
+			// 	messageLogged = "Failed to log message"
+			// } else {
+			// 	fmt.Println("✅ Message logged successfully")
+			// 	messageLogged = "Message logged successfully"
+			// }
+
+			tmpFile := fmt.Sprintf("whatsapp_failed_files/image_%d.jpg", time.Now().UnixNano())
+			url, err := uploadToS3(os.Getenv("AWS_S3_BUCKET_NAME"), tmpFile, fileBytes)
 			if err != nil {
-				fmt.Println("⚠️ Failed to log message:", err)
-				messageLogged = "Failed to log message"
+				fmt.Println("Error uploading file to S3:", err)
+				http.Error(w, "Error uploading file to S3", http.StatusInternalServerError)
+				return
 			} else {
-				fmt.Println("✅ Message logged successfully")
-				messageLogged = "Message logged successfully"
+				err = sendMessageToQueue(WALogMessageForQueue{
+					Type:    "image",
+					From:    senderPhone,
+					To:      recipientPhone,
+					Message: message,
+					Time:    msgTime,
+					File:    url,
+				}, sqsClient, queueURL)
+				if err != nil {
+					logger.Error("⚠️ Failed to send message to SQS:", err)
+				} else {
+					logger.Info("✅ Message sent to SQS successfully")
+				}
 			}
 		}
 
@@ -639,9 +672,8 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 
 		// Send response
 		json.NewEncoder(w).Encode(SendMessageResponseWithLog{
-			Success:       success,
-			Message:       msg,
-			MessageLogged: messageLogged,
+			Success: success,
+			Message: msg,
 		})
 	})
 
@@ -680,33 +712,52 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 		}
 
 		// Save the file temporarily
-		tmpFile := fmt.Sprintf("store/document_%d.pdf", time.Now().UnixNano())
-		err = os.WriteFile(tmpFile, fileBytes, 0644)
-		if err != nil {
-			fmt.Println("Error saving file:", err)
-			http.Error(w, "Error saving file", http.StatusInternalServerError)
-			return
-		}
-		defer os.Remove(tmpFile)
+		// tmpFile := fmt.Sprintf("store/document_%d.pdf", time.Now().UnixNano())
+		// err = os.WriteFile(tmpFile, fileBytes, 0644)
+		// if err != nil {
+		// 	fmt.Println("Error saving file:", err)
+		// 	http.Error(w, "Error saving file", http.StatusInternalServerError)
+		// 	return
+		// }
+		// defer os.Remove(tmpFile)
 
 		// Send the message
 		success, msg := sendWhatsAppDocumentMessage(client, recipient, message, fileBytes, fileName, mimeType)
 		fmt.Println("Message sent", success, msg)
 
-		var messageLogged string
 		// Log the message
 		if success {
 			senderPhone := client.Store.ID.User
 			recipientPhone := recipient
 			msgTime := time.Now()
-			err := logfunction.LogDocumentMessage(senderPhone, message, recipientPhone, tmpFile, msgTime)
+
+			tmpFile := fmt.Sprintf("whatsapp_failed_files/document_%d.pdf", time.Now().UnixNano())
+			url, err := uploadToS3(os.Getenv("AWS_S3_BUCKET_NAME"), tmpFile, fileBytes)
 			if err != nil {
-				fmt.Println("⚠️ Failed to log message:", err)
-				messageLogged = "Failed to log message"
+				fmt.Println("Error uploading file to S3:", err)
+				http.Error(w, "Error uploading file to S3", http.StatusInternalServerError)
+				return
 			} else {
-				fmt.Println("✅ Message logged successfully")
-				messageLogged = "Message logged successfully"
+				err = sendMessageToQueue(WALogMessageForQueue{
+					Type:    "document",
+					From:    senderPhone,
+					To:      recipientPhone,
+					Message: message,
+					File:    url,
+					Time:    msgTime,
+				}, sqsClient, queueURL)
+				if err != nil {
+					logger.Error("⚠️ Failed to send message to SQS:", err)
+				} else {
+					logger.Info("✅ Message sent to SQS successfully")
+				}
 			}
+			// err = logfunction.LogDocumentMessage(senderPhone, message, recipientPhone, url, msgTime)
+			// if err != nil {
+			// 	fmt.Println("⚠️ Failed to log message:", err)
+			// } else {
+			// 	fmt.Println("✅ Message logged successfully")
+			// }
 		}
 
 		// Set response headers
@@ -717,9 +768,8 @@ func startRESTServer(client *whatsmeow.Client, port int) {
 		}
 
 		json.NewEncoder(w).Encode(SendMessageResponseWithLog{
-			Success:       success,
-			Message:       msg,
-			MessageLogged: messageLogged,
+			Success: success,
+			Message: msg,
 		})
 	})
 
@@ -809,6 +859,7 @@ func recieveMessagesFromQueue(sqsClient *sqs.Client, queueUrl string) error {
 		fmt.Println("No messages in the queue")
 		return nil
 	}
+	fmt.Println("Received", len(output.Messages), "messages from SQS queue")
 
 	for _, msg := range output.Messages {
 		var message WALogMessageForQueue
@@ -817,22 +868,23 @@ func recieveMessagesFromQueue(sqsClient *sqs.Client, queueUrl string) error {
 			fmt.Println("❌ Error unmarshalling message:", err)
 			continue
 		}
-		if message.Type == "text" {
-			if err := logfunction.LogMessage(message.From, message.Message, message.To, message.Time); err != nil {
-				fmt.Println("❌ Error logging message:", err)
-			}
+
+		var logErr error
+		switch message.Type {
+		case "text":
+			logErr = logfunction.LogMessage(message.From, message.Message, message.To, message.Time)
+		case "image":
+			logErr = logfunction.LogImageMessageSQS(message.From, message.Message, message.To, message.File, message.Time)
+		case "document":
+			logErr = logfunction.LogDocumentMessageSQS(message.From, message.Message, message.To, message.File, message.Time)
+		default:
+			fmt.Println("❌ Unknown message type:", message.Type)
+			continue
 		}
 
-		if message.Type == "image" {
-			if err := logfunction.LogImageMessageSQS(message.From, message.Message, message.To, message.File, message.Time); err != nil {
-				fmt.Println("❌ Error logging image message:", err)
-			}
-		}
-
-		if message.Type == "document" {
-			if err := logfunction.LogDocumentMessageSQS(message.From, message.Message, message.To, message.File, message.Time); err != nil {
-				fmt.Println("❌ Error logging document message:", err)
-			}
+		if logErr != nil {
+			fmt.Println("❌ Error logging message:", logErr)
+			continue
 		}
 
 		// Delete from queue
@@ -841,7 +893,7 @@ func recieveMessagesFromQueue(sqsClient *sqs.Client, queueUrl string) error {
 			ReceiptHandle: msg.ReceiptHandle,
 		})
 		if err != nil {
-			fmt.Println("❌ Error deleting message from SQS:", err)
+			return fmt.Errorf("error deleting message from SQS: %w", err)
 		}
 		fmt.Println("✅ Message processed and deleted from SQS:", message.Message)
 	}
@@ -992,7 +1044,7 @@ func main() {
 				}
 
 				// Save document temporarily
-				tmpFile := fmt.Sprintf("store/document_%d.pdf", time.Now().UnixNano())
+				tmpFile := fmt.Sprintf("whatsapp_failed_files/document_%d.pdf", time.Now().UnixNano())
 
 				// upload to s3
 				url, err := uploadToS3(os.Getenv("AWS_S3_BUCKET_NAME"), tmpFile, data)
@@ -1030,7 +1082,7 @@ func main() {
 				}
 
 				// Save image temporarily
-				tmpFile := fmt.Sprintf("store/image_%d.jpg", time.Now().UnixNano())
+				tmpFile := fmt.Sprintf("whatsapp_failed_files/image_%d.jpg", time.Now().UnixNano())
 
 				// upload to s3
 				url, err := uploadToS3(os.Getenv("AWS_S3_BUCKET_NAME"), tmpFile, data)
@@ -1149,7 +1201,7 @@ func main() {
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
 	// Start REST API server
-	startRESTServer(client, 6000)
+	startRESTServer(client, sqsClient, *result.QueueUrl, 6000)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)

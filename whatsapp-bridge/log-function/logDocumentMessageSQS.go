@@ -2,6 +2,7 @@ package logfunction
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"mime/multipart"
@@ -17,17 +18,17 @@ import (
 func LogDocumentMessageSQS(senderPhone string, text string, recipientPhone string, filePath string, messageTime time.Time) error {
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		return err
 	}
 	bearerToken := os.Getenv("BEARER_TOKEN")
 	if bearerToken == "" {
-		log.Fatal("BEARER_TOKEN not set in .env file")
+		return fmt.Errorf("BEARER_TOKEN not set in .env file")
 	}
 
 	resp, err := http.Get(filePath)
 	if err != nil {
-		log.Println("❌ Error fetching file:", err)
-		return err
+		log.Println("❌ Error fetching S3 file:", err)
+		return fmt.Errorf("error fetching S3 file: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -56,8 +57,7 @@ func LogDocumentMessageSQS(senderPhone string, text string, recipientPhone strin
 
 	req, err := http.NewRequest("POST", LogAPIEndpoint, body)
 	if err != nil {
-		log.Println("❌ Error creating request:", err)
-		return err
+		return fmt.Errorf("error creating request: %v", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+bearerToken)
@@ -72,6 +72,11 @@ func LogDocumentMessageSQS(senderPhone string, text string, recipientPhone strin
 	}
 	defer apiResp.Body.Close()
 
-	log.Println("✅ Document message logged successfully")
+	if apiResp.StatusCode != http.StatusOK {
+		log.Println("❌ Error response from API:", apiResp.Status)
+		return fmt.Errorf("error response from log API: %s", apiResp.Status)
+	}
+
+	// log.Println("✅ Document message logged successfully")
 	return nil
 }

@@ -2,6 +2,7 @@ package logfunction
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -21,12 +22,12 @@ func LogMessage(senderPhone string, text string, recipientPhone string, messageT
 	// load .env file
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		return err
 	}
 	// get BEARER_TOKEN from .env file
 	bearerToken := os.Getenv("BEARER_TOKEN")
 	if bearerToken == "" {
-		log.Fatal("BEARER_TOKEN not set in .env file")
+		return fmt.Errorf("BEARER_TOKEN not set in .env file")
 	}
 
 	_ = writer.WriteField("entity_phone_number_from", senderPhone)
@@ -39,7 +40,7 @@ func LogMessage(senderPhone string, text string, recipientPhone string, messageT
 
 	req, err := http.NewRequest("POST", LogAPIEndpoint, body)
 	if err != nil {
-		return err
+		return fmt.Errorf("error creating request: %v", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+bearerToken)
@@ -54,5 +55,9 @@ func LogMessage(senderPhone string, text string, recipientPhone string, messageT
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		log.Println("❌ Error response from log API:", resp.Status)
+		return fmt.Errorf("error response from log API: %s", resp.Status)
+	}
 	return nil
 }
