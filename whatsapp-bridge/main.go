@@ -1132,6 +1132,31 @@ func main() {
 				}
 			}
 
+			// print("REPLY Message1: ", v.Message.GetExtendedTextMessage().GetText()) // ye reply message hai
+			replyMessage := ""
+
+			if v.Message.GetExtendedTextMessage() != nil && v.Message.GetExtendedTextMessage().GetContextInfo() != nil {
+				replyMessage = v.Message.GetExtendedTextMessage().GetText()
+
+				if replyMessage != "" {
+					err = sendMessageToQueue(WALogMessageForQueue{
+						Type:    "text",
+						From:    sender,
+						To:      recipient,
+						Message: replyMessage,
+						Time:    timestamp,
+					}, sqsClient, *result.QueueUrl)
+					if err != nil {
+						logger.Errorf("❌ Failed to send reply message to SQS: %v", err)
+					} else {
+						logger.Infof("✅ Reply message sent to SQS queue successfully")
+					}
+				}
+			}
+
+			// replyMessage = *v.Message.GetExtendedTextMessage().GetContextInfo().QuotedMessage.Conversation // jiska reply kiya hai
+			// println("Reply message2: ", replyMessage)
+
 		case *events.Receipt:
 			// Process regular messages
 			handleReceipt(client, messageStore, v, logger)
