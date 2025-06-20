@@ -871,7 +871,7 @@ func recieveMessagesFromQueue(sqsClient *sqs.Client, queueUrl string) error {
 
 		var logErr error
 		switch message.Type {
-		case "text":
+		case "text", "location", "contact":
 			logErr = logfunction.LogMessage(message.From, message.Message, message.To, message.Time)
 		case "image":
 			logErr = logfunction.LogImageMessageSQS(message.From, message.Message, message.To, message.File, message.Time)
@@ -1027,6 +1027,8 @@ func main() {
 			text := v.Message.GetConversation()
 			image := v.Message.ImageMessage
 			document := v.Message.DocumentMessage
+			location := v.Message.LocationMessage
+			contact := v.Message.ContactMessage
 
 			fmt.Println("Received message:", text, "from", sender, "to", recipient)
 
@@ -1129,6 +1131,52 @@ func main() {
 					logger.Errorf("❌ Failed to send message to SQS: %v", err)
 				} else {
 					logger.Infof("✅ Message sent to SQS queue successfully")
+				}
+			}
+
+			// Check if message is a location message
+			if location != nil {
+				lat := location.GetDegreesLatitude()
+				lon := location.GetDegreesLongitude()
+				url := "https://maps.google.com/?q=" + fmt.Sprintf("%f", lat) + "," + fmt.Sprintf("%f", lon)
+
+				fmt.Println("📍 Location received from", sender, "to", recipient, url)
+				// Send location to SQS queue
+				err = sendMessageToQueue(WALogMessageForQueue{
+					Type:    "location",
+					From:    sender,
+					To:      recipient,
+					Message: url,
+					Time:    timestamp,
+					File:    "",
+				}, sqsClient, *result.QueueUrl)
+				if err != nil {
+					logger.Errorf("❌ Failed to send location message to SQS: %v", err)
+				} else {
+					logger.Infof("✅ Location message sent to SQS queue successfully")
+				}
+			}
+
+			// Check if message is a contact message
+			if contact != nil {
+				contactInfo := contact.GetVcard()
+				contactName, contactNumber := parseVCard(contactInfo)
+
+				fmt.Println("📇 Contact received from", sender, "to", recipient, contactName, contactNumber)
+
+				// Send contact to SQS queue
+				err = sendMessageToQueue(WALogMessageForQueue{
+					Type:    "contact",
+					From:    sender,
+					To:      recipient,
+					Message: contactName + " - " + contactNumber,
+					Time:    timestamp,
+					File:    "",
+				}, sqsClient, *result.QueueUrl)
+				if err != nil {
+					logger.Errorf("❌ Failed to send contact message to SQS: %v", err)
+				} else {
+					logger.Infof("✅ Contact message sent to SQS queue successfully")
 				}
 			}
 
@@ -1240,6 +1288,23 @@ func main() {
 	fmt.Println("Disconnecting...")
 	// Disconnect client
 	client.Disconnect()
+}
+
+func parseVCard(vcard string) (name, number string) {
+	lines := strings.Split(vcard, "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "FN:") {
+			// The name is everything after "FN:"
+			name = strings.TrimSpace(strings.TrimPrefix(line, "FN:"))
+		} else if strings.HasPrefix(line, "TEL;") {
+			// The number is everything after the last ":"
+			parts := strings.Split(line, ":")
+			if len(parts) > 1 {
+				number = strings.TrimSpace(parts[len(parts)-1])
+			}
+		}
+	}
+	return name, number
 }
 
 // GetChatName determines the appropriate name for a chat based on JID and other info
