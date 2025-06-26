@@ -231,8 +231,9 @@ type SendMessageResponse struct {
 
 // SendMessageRequest represents the request body for the send message API
 type SendMessageRequest struct {
-	Recipient string `json:"recipient"`
-	Message   string `json:"message"`
+	Recipient  string `json:"recipient"`
+	Message    string `json:"message"`
+	AdminPhone string `json:"admin_phone"`
 }
 
 type SendMessageResponseWithLog struct {
@@ -537,6 +538,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 			senderPhone := client.Store.ID.User
 			recipientPhone := req.Recipient
 			msgTime := time.Now()
+			adminPhone := req.AdminPhone
 			// err := logfunction.LogMessage(senderPhone, req.Message, recipientPhone, msgTime)
 			// if err != nil {
 			// 	fmt.Println("⚠️ Failed to log message:", err)
@@ -546,12 +548,13 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 			// 	messageLogged = "Message logged successfully"
 			// }
 			err := sendMessageToQueue(WALogMessageForQueue{
-				Type:    "text",
-				From:    senderPhone,
-				To:      recipientPhone,
-				Message: req.Message,
-				File:    "",
-				Time:    msgTime,
+				Type:       "text",
+				From:       senderPhone,
+				To:         recipientPhone,
+				AdminPhone: adminPhone,
+				Message:    req.Message,
+				File:       "",
+				Time:       msgTime,
 			}, sqsClient, queueURL)
 			if err != nil {
 				logger.Error("Failed to send message to SQS:", err)
@@ -596,6 +599,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 		// Get additional form fields
 		recipient := r.FormValue("recipient")
 		message := r.FormValue("message")
+		adminPhone := r.FormValue("admin_phone")
 
 		// Read the file into a byte array
 		fileBytes, err := io.ReadAll(file)
@@ -630,6 +634,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 			senderPhone := client.Store.ID.User
 			recipientPhone := recipient
 			msgTime := time.Now()
+			admPhone := adminPhone
 			// err := logfunction.LogImageMessage(senderPhone, message, recipientPhone, tmpFile, msgTime)
 			// if err != nil {
 			// 	fmt.Println("⚠️ Failed to log message:", err)
@@ -647,12 +652,13 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 				return
 			} else {
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:    "image",
-					From:    senderPhone,
-					To:      recipientPhone,
-					Message: message,
-					Time:    msgTime,
-					File:    url,
+					Type:       "image",
+					From:       senderPhone,
+					To:         recipientPhone,
+					AdminPhone: admPhone,
+					Message:    message,
+					Time:       msgTime,
+					File:       url,
 				}, sqsClient, queueURL)
 				if err != nil {
 					logger.Error("⚠️ Failed to send message to SQS:", err)
@@ -696,6 +702,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 		// Get additional form fields
 		recipient := r.FormValue("recipient")
 		message := r.FormValue("message")
+		adminPhone := r.FormValue("admin_phone")
 
 		// Read the file into a byte array
 		fileBytes, err := io.ReadAll(file)
@@ -730,6 +737,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 			senderPhone := client.Store.ID.User
 			recipientPhone := recipient
 			msgTime := time.Now()
+			admPhone := adminPhone
 
 			tmpFile := fmt.Sprintf("whatsapp_failed_files/document_%d.pdf", time.Now().UnixNano())
 			url, err := uploadToS3(os.Getenv("AWS_S3_BUCKET_NAME"), tmpFile, fileBytes)
@@ -739,12 +747,13 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 				return
 			} else {
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:    "document",
-					From:    senderPhone,
-					To:      recipientPhone,
-					Message: message,
-					File:    url,
-					Time:    msgTime,
+					Type:       "document",
+					From:       senderPhone,
+					To:         recipientPhone,
+					AdminPhone: admPhone,
+					Message:    message,
+					File:       url,
+					Time:       msgTime,
 				}, sqsClient, queueURL)
 				if err != nil {
 					logger.Error("⚠️ Failed to send message to SQS:", err)
@@ -820,12 +829,13 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 const LogAPIEndpoint = "https://backend.railse.com/whatsapp/log-message"
 
 type WALogMessageForQueue struct {
-	Type    string    `json:"type"` // "text", "image", "document"
-	From    string    `json:"from"`
-	To      string    `json:"to"`
-	Message string    `json:"message"`
-	File    string    `json:"file"`
-	Time    time.Time `json:"time"`
+	Type       string    `json:"type"` // "text", "image", "document"
+	From       string    `json:"from"`
+	To         string    `json:"to"`
+	AdminPhone string    `json:"admin_phone"`
+	Message    string    `json:"message"`
+	File       string    `json:"file"`
+	Time       time.Time `json:"time"`
 }
 
 func sendMessageToQueue(message WALogMessageForQueue, sqsClient *sqs.Client, queueUrl string) error {
@@ -872,11 +882,11 @@ func recieveMessagesFromQueue(sqsClient *sqs.Client, queueUrl string) error {
 		var logErr error
 		switch message.Type {
 		case "text", "location", "contact":
-			logErr = logfunction.LogMessage(message.From, message.Message, message.To, message.Time)
+			logErr = logfunction.LogMessage(message.From, message.Message, message.To, message.Time, message.AdminPhone)
 		case "image":
-			logErr = logfunction.LogImageMessageSQS(message.From, message.Message, message.To, message.File, message.Time)
+			logErr = logfunction.LogImageMessageSQS(message.From, message.Message, message.To, message.File, message.Time, message.AdminPhone)
 		case "document":
-			logErr = logfunction.LogDocumentMessageSQS(message.From, message.Message, message.To, message.File, message.Time)
+			logErr = logfunction.LogDocumentMessageSQS(message.From, message.Message, message.To, message.File, message.Time, message.AdminPhone)
 		default:
 			fmt.Println("❌ Unknown message type:", message.Type)
 			continue
@@ -1061,12 +1071,13 @@ func main() {
 				}
 
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:    "document",
-					From:    sender,
-					To:      recipient,
-					Message: caption,
-					Time:    timestamp,
-					File:    url,
+					Type:       "document",
+					From:       sender,
+					To:         recipient,
+					Message:    caption,
+					Time:       timestamp,
+					File:       url,
+					AdminPhone: sender,
 				}, sqsClient, *result.QueueUrl)
 				if err != nil {
 					logger.Errorf("❌ Failed to send document message to SQS: %v", err)
@@ -1101,12 +1112,13 @@ func main() {
 				}
 
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:    "image",
-					From:    sender,
-					To:      recipient,
-					Message: caption,
-					Time:    timestamp,
-					File:    url,
+					Type:       "image",
+					From:       sender,
+					To:         recipient,
+					Message:    caption,
+					Time:       timestamp,
+					File:       url,
+					AdminPhone: sender,
 				}, sqsClient, *result.QueueUrl)
 				if err != nil {
 					logger.Errorf("❌ Failed to send image message to SQS: %v", err)
@@ -1120,12 +1132,13 @@ func main() {
 
 				// Send message to SQS queue
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:    "text",
-					From:    sender,
-					To:      recipient,
-					Message: text,
-					Time:    timestamp,
-					File:    "",
+					Type:       "text",
+					From:       sender,
+					To:         recipient,
+					Message:    text,
+					Time:       timestamp,
+					File:       "",
+					AdminPhone: sender,
 				}, sqsClient, *result.QueueUrl)
 				if err != nil {
 					logger.Errorf("❌ Failed to send message to SQS: %v", err)
@@ -1143,12 +1156,13 @@ func main() {
 				fmt.Println("📍 Location received from", sender, "to", recipient, url)
 				// Send location to SQS queue
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:    "location",
-					From:    sender,
-					To:      recipient,
-					Message: url,
-					Time:    timestamp,
-					File:    "",
+					Type:       "location",
+					From:       sender,
+					To:         recipient,
+					Message:    url,
+					Time:       timestamp,
+					File:       "",
+					AdminPhone: sender,
 				}, sqsClient, *result.QueueUrl)
 				if err != nil {
 					logger.Errorf("❌ Failed to send location message to SQS: %v", err)
@@ -1166,12 +1180,13 @@ func main() {
 
 				// Send contact to SQS queue
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:    "contact",
-					From:    sender,
-					To:      recipient,
-					Message: contactName + " - " + contactNumber,
-					Time:    timestamp,
-					File:    "",
+					Type:       "contact",
+					From:       sender,
+					To:         recipient,
+					Message:    contactName + " - " + contactNumber,
+					Time:       timestamp,
+					File:       "",
+					AdminPhone: sender,
 				}, sqsClient, *result.QueueUrl)
 				if err != nil {
 					logger.Errorf("❌ Failed to send contact message to SQS: %v", err)
@@ -1188,11 +1203,12 @@ func main() {
 
 				if replyMessage != "" {
 					err = sendMessageToQueue(WALogMessageForQueue{
-						Type:    "text",
-						From:    sender,
-						To:      recipient,
-						Message: replyMessage,
-						Time:    timestamp,
+						Type:       "text",
+						From:       sender,
+						To:         recipient,
+						Message:    replyMessage,
+						Time:       timestamp,
+						AdminPhone: sender,
 					}, sqsClient, *result.QueueUrl)
 					if err != nil {
 						logger.Errorf("❌ Failed to send reply message to SQS: %v", err)
