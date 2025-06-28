@@ -231,9 +231,10 @@ type SendMessageResponse struct {
 
 // SendMessageRequest represents the request body for the send message API
 type SendMessageRequest struct {
-	Recipient  string `json:"recipient"`
-	Message    string `json:"message"`
-	AdminPhone string `json:"admin_phone"`
+	Recipient       string `json:"recipient"`
+	Message         string `json:"message"`
+	AdminPhone      string `json:"admin_phone"`
+	ParentMessageID string `json:"wa_parent_message_id"`
 }
 
 type SendMessageResponseWithLog struct {
@@ -242,9 +243,9 @@ type SendMessageResponseWithLog struct {
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, parentMessageID string) (bool, string, string, string) {
 	if !client.IsConnected() {
-		return false, "Not connected to WhatsApp"
+		return false, "Not connected to WhatsApp", "", ""
 	}
 
 	// Create JID for recipient
@@ -258,7 +259,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 		// Parse the JID string
 		recipientJID, err = types.ParseJID(recipient)
 		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err)
+			return false, fmt.Sprintf("Error parsing JID: %v", err), "", ""
 		}
 	} else {
 		server := "s.whatsapp.net" // Default server for personal chats
@@ -272,21 +273,38 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 		}
 	}
 
-	// Send the message
-	_, err = client.SendMessage(context.Background(), recipientJID, &waProto.Message{
-		Conversation: proto.String(message),
-	})
-
-	if err != nil {
-		return false, fmt.Sprintf("Error sending message: %v", err)
+	// Create the message to send
+	msgToSend := &waProto.Message{}
+	if parentMessageID != "" {
+		msgToSend = &waProto.Message{
+			ExtendedTextMessage: &waProto.ExtendedTextMessage{
+				Text: proto.String(message),
+				ContextInfo: &waProto.ContextInfo{
+					StanzaID: &parentMessageID,
+				},
+			},
+		}
+	} else {
+		msgToSend = &waProto.Message{
+			Conversation: proto.String(message),
+		}
 	}
 
-	return true, fmt.Sprintf("Message sent to %s", recipient)
+	if err != nil {
+		return false, fmt.Sprintf("Error sending message: %v", err), "", ""
+	}
+
+	resp, err := client.SendMessage(context.Background(), recipientJID, msgToSend)
+	if err != nil {
+		return false, fmt.Sprintf("Error sending message: %v", err), "", ""
+	}
+
+	return true, fmt.Sprintf("Message sent to %s", recipient), resp.ID, parentMessageID
 }
 
-func sendWhatsAppImageMessage(client *whatsmeow.Client, recipient string, message string, image []byte) (bool, string) {
+func sendWhatsAppImageMessage(client *whatsmeow.Client, recipient string, message string, image []byte, parentMessageID string) (bool, string, string, string) {
 	if !client.IsConnected() {
-		return false, "Not connected to WhatsApp"
+		return false, "Not connected to WhatsApp", "", ""
 	}
 
 	// Create JID for recipient
@@ -300,7 +318,7 @@ func sendWhatsAppImageMessage(client *whatsmeow.Client, recipient string, messag
 		// Parse the JID string
 		recipientJID, err = types.ParseJID(recipient)
 		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err)
+			return false, fmt.Sprintf("Error parsing JID: %v", err), "", ""
 		}
 	} else {
 		server := "s.whatsapp.net" // Default server for personal chats
@@ -317,14 +335,14 @@ func sendWhatsAppImageMessage(client *whatsmeow.Client, recipient string, messag
 	resp, err := client.Upload(context.Background(), image, whatsmeow.MediaImage)
 	// handle error
 	if err != nil {
-		return false, fmt.Sprintf("Error uploading image: %v", err)
+		return false, fmt.Sprintf("Error uploading image: %v", err), "", ""
 	}
 
 	imageMsg := &waE2E.ImageMessage{
-		Caption:  proto.String(message),
-		Mimetype: proto.String("image/png"), // replace this with the actual mime type
+		Caption: proto.String(message),
+		// Mimetype: proto.String("image/png"), // replace this with the actual mime type
 		// you can also optionally add other fields like ContextInfo and JpegThumbnail here
-
+		Mimetype:      proto.String(http.DetectContentType(image)),
 		URL:           &resp.URL,
 		DirectPath:    &resp.DirectPath,
 		MediaKey:      resp.MediaKey,
@@ -332,20 +350,27 @@ func sendWhatsAppImageMessage(client *whatsmeow.Client, recipient string, messag
 		FileSHA256:    resp.FileSHA256,
 		FileLength:    &resp.FileLength,
 	}
-	_, err = client.SendMessage(context.Background(), recipientJID, &waE2E.Message{
+
+	if parentMessageID != "" {
+		imageMsg.ContextInfo = &waE2E.ContextInfo{
+			StanzaID: &parentMessageID,
+		}
+	}
+
+	sendResp, err := client.SendMessage(context.Background(), recipientJID, &waE2E.Message{
 		ImageMessage: imageMsg,
 	})
 
 	if err != nil {
-		return false, fmt.Sprintf("Error sending image message: %v", err)
+		return false, fmt.Sprintf("Error sending image message: %v", err), "", ""
 	}
 
-	return true, fmt.Sprintf("Image message sent to %s", recipient)
+	return true, fmt.Sprintf("Image message sent to %s", recipient), sendResp.ID, parentMessageID
 }
 
-func sendWhatsAppDocumentMessage(client *whatsmeow.Client, recipient string, message string, document []byte, fileName string, mimeType string) (bool, string) {
+func sendWhatsAppDocumentMessage(client *whatsmeow.Client, recipient string, message string, document []byte, fileName string, mimeType string, parentMessageID string) (bool, string, string, string) {
 	if !client.IsConnected() {
-		return false, "Not connected to WhatsApp"
+		return false, "Not connected to WhatsApp", "", ""
 	}
 
 	// Create JID for recipient
@@ -359,7 +384,7 @@ func sendWhatsAppDocumentMessage(client *whatsmeow.Client, recipient string, mes
 		// Parse the JID string
 		recipientJID, err = types.ParseJID(recipient)
 		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err)
+			return false, fmt.Sprintf("Error parsing JID: %v", err), "", ""
 		}
 	} else {
 		server := "s.whatsapp.net" // Default server for personal chats
@@ -375,7 +400,7 @@ func sendWhatsAppDocumentMessage(client *whatsmeow.Client, recipient string, mes
 
 	resp, err := client.Upload(context.Background(), document, whatsmeow.MediaDocument)
 	if err != nil {
-		return false, fmt.Sprintf("Error uploading document: %v", err)
+		return false, fmt.Sprintf("Error uploading document: %v", err), "", ""
 	}
 
 	docMsg := &waE2E.DocumentMessage{
@@ -391,15 +416,22 @@ func sendWhatsAppDocumentMessage(client *whatsmeow.Client, recipient string, mes
 		FileLength:    &resp.FileLength,
 	}
 
-	_, err = client.SendMessage(context.Background(), recipientJID, &waE2E.Message{
+	if parentMessageID != "" {
+		docMsg.ContextInfo = &waE2E.ContextInfo{
+			StanzaID: &parentMessageID,
+		}
+	}
+
+	// Send the document message
+	sendResp, err := client.SendMessage(context.Background(), recipientJID, &waE2E.Message{
 		DocumentMessage: docMsg,
 	})
 
 	if err != nil {
-		return false, fmt.Sprintf("Error sending document message: %v", err)
+		return false, fmt.Sprintf("Error sending document message: %v", err), "", ""
 	}
 
-	return true, fmt.Sprintf("Document message sent to %s", recipient)
+	return true, fmt.Sprintf("Document message sent to %s", recipient), sendResp.ID, parentMessageID
 }
 
 func createWhatsAppGroup(client *whatsmeow.Client, req CreateGroupRequest) (CreateGroupResponse, error) {
@@ -530,8 +562,8 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 		}
 
 		// Send the message
-		success, msg := sendWhatsAppMessage(client, req.Recipient, req.Message)
-		fmt.Println("Message sent", success, msg)
+		success, msg, msgID, parentMsgID := sendWhatsAppMessage(client, req.Recipient, req.Message, req.ParentMessageID)
+		fmt.Println("Message sent", success, msg, msgID)
 
 		// Log the message
 		if success {
@@ -548,13 +580,15 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 			// 	messageLogged = "Message logged successfully"
 			// }
 			err := sendMessageToQueue(WALogMessageForQueue{
-				Type:       "text",
-				From:       senderPhone,
-				To:         recipientPhone,
-				AdminPhone: adminPhone,
-				Message:    req.Message,
-				File:       "",
-				Time:       msgTime,
+				Type:            "text",
+				From:            senderPhone,
+				To:              recipientPhone,
+				AdminPhone:      adminPhone,
+				Message:         req.Message,
+				File:            "",
+				Time:            msgTime,
+				MessageID:       msgID,
+				ParentMessageID: parentMsgID,
 			}, sqsClient, queueURL)
 			if err != nil {
 				logger.Error("Failed to send message to SQS:", err)
@@ -600,6 +634,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 		recipient := r.FormValue("recipient")
 		message := r.FormValue("message")
 		adminPhone := r.FormValue("admin_phone")
+		parentMessageID := r.FormValue("wa_parent_message_id")
 
 		// Read the file into a byte array
 		fileBytes, err := io.ReadAll(file)
@@ -626,7 +661,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 		// defer os.Remove(tmpFile)
 
 		// Send the message
-		success, msg := sendWhatsAppImageMessage(client, recipient, message, fileBytes)
+		success, msg, msgID, parentMsgID := sendWhatsAppImageMessage(client, recipient, message, fileBytes, parentMessageID)
 		fmt.Println("Message sent", success, msg)
 
 		// Log the message
@@ -652,13 +687,15 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 				return
 			} else {
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:       "image",
-					From:       senderPhone,
-					To:         recipientPhone,
-					AdminPhone: admPhone,
-					Message:    message,
-					Time:       msgTime,
-					File:       url,
+					Type:            "image",
+					From:            senderPhone,
+					To:              recipientPhone,
+					AdminPhone:      admPhone,
+					Message:         message,
+					Time:            msgTime,
+					File:            url,
+					MessageID:       msgID,
+					ParentMessageID: parentMsgID,
 				}, sqsClient, queueURL)
 				if err != nil {
 					logger.Error("⚠️ Failed to send message to SQS:", err)
@@ -703,6 +740,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 		recipient := r.FormValue("recipient")
 		message := r.FormValue("message")
 		adminPhone := r.FormValue("admin_phone")
+		parentMessageID := r.FormValue("wa_parent_message_id")
 
 		// Read the file into a byte array
 		fileBytes, err := io.ReadAll(file)
@@ -729,7 +767,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 		// defer os.Remove(tmpFile)
 
 		// Send the message
-		success, msg := sendWhatsAppDocumentMessage(client, recipient, message, fileBytes, fileName, mimeType)
+		success, msg, msgID, parentMsgID := sendWhatsAppDocumentMessage(client, recipient, message, fileBytes, fileName, mimeType, parentMessageID)
 		fmt.Println("Message sent", success, msg)
 
 		// Log the message
@@ -747,13 +785,15 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 				return
 			} else {
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:       "document",
-					From:       senderPhone,
-					To:         recipientPhone,
-					AdminPhone: admPhone,
-					Message:    message,
-					File:       url,
-					Time:       msgTime,
+					Type:            "document",
+					From:            senderPhone,
+					To:              recipientPhone,
+					AdminPhone:      admPhone,
+					Message:         message,
+					File:            url,
+					Time:            msgTime,
+					MessageID:       msgID,
+					ParentMessageID: parentMsgID,
 				}, sqsClient, queueURL)
 				if err != nil {
 					logger.Error("⚠️ Failed to send message to SQS:", err)
