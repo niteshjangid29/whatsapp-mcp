@@ -829,13 +829,15 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 const LogAPIEndpoint = "https://backend.railse.com/whatsapp/log-message"
 
 type WALogMessageForQueue struct {
-	Type       string    `json:"type"` // "text", "image", "document"
-	From       string    `json:"from"`
-	To         string    `json:"to"`
-	AdminPhone string    `json:"admin_phone"`
-	Message    string    `json:"message"`
-	File       string    `json:"file"`
-	Time       time.Time `json:"time"`
+	MessageID       string    `json:"wa_message_id"`
+	ParentMessageID string    `json:"wa_parent_message_id"`
+	Type            string    `json:"type"` // "text", "image", "document"
+	From            string    `json:"from"`
+	To              string    `json:"to"`
+	AdminPhone      string    `json:"admin_phone"`
+	Message         string    `json:"message"`
+	File            string    `json:"file"`
+	Time            time.Time `json:"time"`
 }
 
 func sendMessageToQueue(message WALogMessageForQueue, sqsClient *sqs.Client, queueUrl string) error {
@@ -882,11 +884,11 @@ func recieveMessagesFromQueue(sqsClient *sqs.Client, queueUrl string) error {
 		var logErr error
 		switch message.Type {
 		case "text", "location", "contact":
-			logErr = logfunction.LogMessage(message.From, message.Message, message.To, message.Time, message.AdminPhone)
+			logErr = logfunction.LogMessage(message.From, message.Message, message.To, message.Time, message.AdminPhone, message.MessageID, message.ParentMessageID)
 		case "image":
-			logErr = logfunction.LogImageMessageSQS(message.From, message.Message, message.To, message.File, message.Time, message.AdminPhone)
+			logErr = logfunction.LogImageMessageSQS(message.From, message.Message, message.To, message.File, message.Time, message.AdminPhone, message.MessageID, message.ParentMessageID)
 		case "document":
-			logErr = logfunction.LogDocumentMessageSQS(message.From, message.Message, message.To, message.File, message.Time, message.AdminPhone)
+			logErr = logfunction.LogDocumentMessageSQS(message.From, message.Message, message.To, message.File, message.Time, message.AdminPhone, message.MessageID, message.ParentMessageID)
 		default:
 			fmt.Println("❌ Unknown message type:", message.Type)
 			continue
@@ -1039,8 +1041,34 @@ func main() {
 			document := v.Message.DocumentMessage
 			location := v.Message.LocationMessage
 			contact := v.Message.ContactMessage
+			contacts := v.Message.ContactsArrayMessage
+			messageId := v.Info.ID
+			parentMessageId := ""
+			adminPhone := ""
 
 			fmt.Println("Received message:", text, "from", sender, "to", recipient)
+
+			var contextInfo *waE2E.ContextInfo
+			if m := v.Message.GetExtendedTextMessage(); m != nil {
+				contextInfo = m.GetContextInfo()
+			} else if m := v.Message.GetImageMessage(); m != nil {
+				contextInfo = m.GetContextInfo()
+			} else if m := v.Message.GetDocumentMessage(); m != nil {
+				contextInfo = m.GetContextInfo()
+			} else if m := v.Message.GetContactMessage(); m != nil {
+				contextInfo = m.GetContextInfo()
+			} else if m := v.Message.GetLocationMessage(); m != nil {
+				contextInfo = m.GetContextInfo()
+			} else if m := v.Message.GetVideoMessage(); m != nil {
+				contextInfo = m.GetContextInfo()
+			}
+
+			// println("Message ID:", messageId)
+
+			if contextInfo != nil && contextInfo.StanzaID != nil && *contextInfo.StanzaID != "" {
+				parentMessageId = *contextInfo.StanzaID
+				// fmt.Printf("Reply detected. Current message ID: %s, Parent message ID: %s\n", messageId, parentMessageId)
+			}
 
 			// Do not save status messages
 			if sender == "status" || recipient == "status" || sender == "status@broadcast" || recipient == "status@broadcast" {
@@ -1071,13 +1099,15 @@ func main() {
 				}
 
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:       "document",
-					From:       sender,
-					To:         recipient,
-					Message:    caption,
-					Time:       timestamp,
-					File:       url,
-					AdminPhone: sender,
+					Type:            "document",
+					From:            sender,
+					To:              recipient,
+					Message:         caption,
+					Time:            timestamp,
+					File:            url,
+					AdminPhone:      adminPhone,
+					MessageID:       messageId,
+					ParentMessageID: parentMessageId,
 				}, sqsClient, *result.QueueUrl)
 				if err != nil {
 					logger.Errorf("❌ Failed to send document message to SQS: %v", err)
@@ -1112,13 +1142,15 @@ func main() {
 				}
 
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:       "image",
-					From:       sender,
-					To:         recipient,
-					Message:    caption,
-					Time:       timestamp,
-					File:       url,
-					AdminPhone: sender,
+					Type:            "image",
+					From:            sender,
+					To:              recipient,
+					Message:         caption,
+					Time:            timestamp,
+					File:            url,
+					AdminPhone:      adminPhone,
+					MessageID:       messageId,
+					ParentMessageID: parentMessageId,
 				}, sqsClient, *result.QueueUrl)
 				if err != nil {
 					logger.Errorf("❌ Failed to send image message to SQS: %v", err)
@@ -1132,13 +1164,15 @@ func main() {
 
 				// Send message to SQS queue
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:       "text",
-					From:       sender,
-					To:         recipient,
-					Message:    text,
-					Time:       timestamp,
-					File:       "",
-					AdminPhone: sender,
+					Type:            "text",
+					From:            sender,
+					To:              recipient,
+					Message:         text,
+					Time:            timestamp,
+					File:            "",
+					AdminPhone:      adminPhone,
+					MessageID:       messageId,
+					ParentMessageID: parentMessageId,
 				}, sqsClient, *result.QueueUrl)
 				if err != nil {
 					logger.Errorf("❌ Failed to send message to SQS: %v", err)
@@ -1156,13 +1190,15 @@ func main() {
 				fmt.Println("📍 Location received from", sender, "to", recipient, url)
 				// Send location to SQS queue
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:       "location",
-					From:       sender,
-					To:         recipient,
-					Message:    url,
-					Time:       timestamp,
-					File:       "",
-					AdminPhone: sender,
+					Type:            "location",
+					From:            sender,
+					To:              recipient,
+					Message:         url,
+					Time:            timestamp,
+					File:            "",
+					AdminPhone:      adminPhone,
+					MessageID:       messageId,
+					ParentMessageID: parentMessageId,
 				}, sqsClient, *result.QueueUrl)
 				if err != nil {
 					logger.Errorf("❌ Failed to send location message to SQS: %v", err)
@@ -1180,18 +1216,47 @@ func main() {
 
 				// Send contact to SQS queue
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:       "contact",
-					From:       sender,
-					To:         recipient,
-					Message:    contactName + " - " + contactNumber,
-					Time:       timestamp,
-					File:       "",
-					AdminPhone: sender,
+					Type:            "contact",
+					From:            sender,
+					To:              recipient,
+					Message:         contactName + " - " + contactNumber,
+					Time:            timestamp,
+					File:            "",
+					AdminPhone:      adminPhone,
+					MessageID:       messageId,
+					ParentMessageID: parentMessageId,
 				}, sqsClient, *result.QueueUrl)
 				if err != nil {
 					logger.Errorf("❌ Failed to send contact message to SQS: %v", err)
 				} else {
 					logger.Infof("✅ Contact message sent to SQS queue successfully")
+				}
+			}
+
+			if contacts != nil {
+				for _, contact := range contacts.GetContacts() {
+					contactInfo := contact.GetVcard()
+					contactName, contactNumber := parseVCard(contactInfo)
+
+					fmt.Println("📇 Contact received from", sender, "to", recipient, contactName, contactNumber)
+
+					// Send contact to SQS queue
+					err = sendMessageToQueue(WALogMessageForQueue{
+						Type:            "contact",
+						From:            sender,
+						To:              recipient,
+						Message:         contactName + " - " + contactNumber,
+						Time:            timestamp,
+						File:            "",
+						AdminPhone:      adminPhone,
+						MessageID:       messageId,
+						ParentMessageID: parentMessageId,
+					}, sqsClient, *result.QueueUrl)
+					if err != nil {
+						logger.Errorf("❌ Failed to send contact message to SQS: %v", err)
+					} else {
+						logger.Infof("✅ Contact message sent to SQS queue successfully")
+					}
 				}
 			}
 
@@ -1203,12 +1268,15 @@ func main() {
 
 				if replyMessage != "" {
 					err = sendMessageToQueue(WALogMessageForQueue{
-						Type:       "text",
-						From:       sender,
-						To:         recipient,
-						Message:    replyMessage,
-						Time:       timestamp,
-						AdminPhone: sender,
+						Type:            "text",
+						From:            sender,
+						To:              recipient,
+						Message:         replyMessage,
+						Time:            timestamp,
+						AdminPhone:      adminPhone,
+						File:            "",
+						MessageID:       messageId,
+						ParentMessageID: parentMessageId,
 					}, sqsClient, *result.QueueUrl)
 					if err != nil {
 						logger.Errorf("❌ Failed to send reply message to SQS: %v", err)
@@ -1217,9 +1285,6 @@ func main() {
 					}
 				}
 			}
-
-			// replyMessage = *v.Message.GetExtendedTextMessage().GetContextInfo().QuotedMessage.Conversation // jiska reply kiya hai
-			// println("Reply message2: ", replyMessage)
 
 		case *events.Receipt:
 			// Process regular messages

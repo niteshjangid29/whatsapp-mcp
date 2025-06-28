@@ -15,7 +15,7 @@ import (
 
 const LogAPIEndpoint = "https://backend.railse.com/whatsapp/log-message"
 
-func LogMessage(senderPhone string, text string, recipientPhone string, messageTime time.Time, adminPhone string) error {
+func LogMessage(senderPhone string, text string, recipientPhone string, messageTime time.Time, adminPhone string, msgId string, parMsgId string) error {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
@@ -36,6 +36,8 @@ func LogMessage(senderPhone string, text string, recipientPhone string, messageT
 	_ = writer.WriteField("message_status", "READ")
 	_ = writer.WriteField("message_time", strconv.FormatInt(messageTime.UnixMilli(), 10))
 	_ = writer.WriteField("admin_phone", adminPhone)
+	_ = writer.WriteField("wa_message_id", msgId)
+	_ = writer.WriteField("wa_parent_message_id", parMsgId)
 
 	writer.Close()
 

@@ -15,7 +15,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-func LogDocumentMessageSQS(senderPhone string, text string, recipientPhone string, filePath string, messageTime time.Time, adminPhone string) error {
+func LogDocumentMessageSQS(senderPhone string, text string, recipientPhone string, filePath string, messageTime time.Time, adminPhone string, msgId string, parMsgId string) error {
 	err := godotenv.Load()
 	if err != nil {
 		return err
@@ -41,6 +41,8 @@ func LogDocumentMessageSQS(senderPhone string, text string, recipientPhone strin
 	_ = writer.WriteField("message_status", "READ")
 	_ = writer.WriteField("message_time", strconv.FormatInt(messageTime.UnixMilli(), 10))
 	_ = writer.WriteField("admin_phone", adminPhone)
+	_ = writer.WriteField("wa_message_id", msgId)
+	_ = writer.WriteField("wa_parent_message_id", parMsgId)
 
 	part, err := writer.CreateFormFile("files", filepath.Base(filePath))
 	if err != nil {
