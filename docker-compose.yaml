@@ -1,0 +1,22 @@
+services:
+  whatsapp-mcp:
+    container_name: whatsapp-mcp
+    image: whatsapp-mcp:latest
+    build:
+      context: ./whatsapp-bridge
+      dockerfile: go.dockerfile
+    ports:
+      - "6000:6000"
+    env_file:
+      - ./whatsapp-bridge/.env
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+      - AWS_SQS_QUEUE_NAME=${AWS_SQS_QUEUE_NAME}
+      - AWS_S3_BUCKET_NAME=${AWS_S3_BUCKET_NAME}
+    volumes:
+      - whatsapp_data:/app/store
+  
+volumes:
+  whatsapp_data:
