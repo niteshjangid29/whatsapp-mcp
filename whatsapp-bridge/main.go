@@ -1076,7 +1076,12 @@ func main() {
 			}
 
 			timestamp := v.Info.Timestamp
-			text := v.Message.GetConversation()
+			var text string
+			if v.Message.GetConversation() != "" {
+				text = v.Message.GetConversation()
+			} else if extMsg := v.Message.GetExtendedTextMessage(); extMsg != nil {
+				text = extMsg.GetText()
+			}
 			image := v.Message.ImageMessage
 			document := v.Message.DocumentMessage
 			location := v.Message.LocationMessage
@@ -1383,30 +1388,30 @@ func main() {
 			}
 
 			// print("REPLY Message1: ", v.Message.GetExtendedTextMessage().GetText()) // ye reply message hai
-			replyMessage := ""
+			// replyMessage := ""
 
-			if v.Message.GetExtendedTextMessage() != nil && v.Message.GetExtendedTextMessage().GetContextInfo() != nil {
-				replyMessage = v.Message.GetExtendedTextMessage().GetText()
+			// if v.Message.GetExtendedTextMessage() != nil && v.Message.GetExtendedTextMessage().GetContextInfo() != nil {
+			// 	replyMessage = v.Message.GetExtendedTextMessage().GetText()
 
-				if replyMessage != "" {
-					err = sendMessageToQueue(WALogMessageForQueue{
-						Type:            "text",
-						From:            sender,
-						To:              recipient,
-						Message:         replyMessage,
-						Time:            timestamp,
-						AdminPhone:      adminPhone,
-						File:            "",
-						MessageID:       messageId,
-						ParentMessageID: parentMessageId,
-					}, sqsClient, *result.QueueUrl)
-					if err != nil {
-						logger.Errorf("❌ Failed to send reply message to SQS: %v", err)
-					} else {
-						logger.Infof("✅ Reply message sent to SQS queue successfully")
-					}
-				}
-			}
+			// 	if replyMessage != "" {
+			// 		err = sendMessageToQueue(WALogMessageForQueue{
+			// 			Type:            "text",
+			// 			From:            sender,
+			// 			To:              recipient,
+			// 			Message:         replyMessage,
+			// 			Time:            timestamp,
+			// 			AdminPhone:      adminPhone,
+			// 			File:            "",
+			// 			MessageID:       messageId,
+			// 			ParentMessageID: parentMessageId,
+			// 		}, sqsClient, *result.QueueUrl)
+			// 		if err != nil {
+			// 			logger.Errorf("❌ Failed to send reply message to SQS: %v", err)
+			// 		} else {
+			// 			logger.Infof("✅ Reply message sent to SQS queue successfully")
+			// 		}
+			// 	}
+			// }
 
 		case *events.Receipt:
 			// Process regular messages
