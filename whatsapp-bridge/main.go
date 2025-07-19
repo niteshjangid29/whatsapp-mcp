@@ -36,6 +36,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+var qrCodeStr string
+
 // Message represents a chat message for our client
 type Message struct {
 	Time     time.Time
@@ -568,6 +570,27 @@ func createWhatsAppGroup(client *whatsmeow.Client, req CreateGroupRequest) (Crea
 
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL string, port int) {
+	// Handler for getting login status
+	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{
+			"logged_in": client.Store.ID != nil,
+			"connected": client.IsConnected(),
+		})
+	})
+
+	// Handler for getting QR code
+	http.HandleFunc("/api/qr-code", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if qrCodeStr != "" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "qr": qrCodeStr})
+		} else {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Already logged in or QR not available."})
+		}
+	})
+
 	// Handler for creating a group
 	http.HandleFunc("/api/create-group", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("Received request to create group")
@@ -604,6 +627,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
+
 		// Only allow POST requests
 		fmt.Println("Received request to send message")
 		if r.Method != http.MethodPost {
@@ -1110,6 +1134,8 @@ func main() {
 		return
 	}
 
+	startRESTServer(client, sqsClient, *result.QueueUrl, 6000)
+
 	// Initialize message store
 	messageStore, err := NewMessageStore()
 	if err != nil {
@@ -1515,9 +1541,11 @@ func main() {
 		// Print QR code for pairing with phone
 		for evt := range qrChan {
 			if evt.Event == "code" {
+				qrCodeStr = evt.Code
 				fmt.Println("\nScan this QR code with your WhatsApp app:")
 				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
 			} else if evt.Event == "success" {
+				qrCodeStr = ""
 				connected <- true
 				break
 			}
@@ -1552,7 +1580,7 @@ func main() {
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
 	// Start REST API server
-	startRESTServer(client, sqsClient, *result.QueueUrl, 6000)
+	// startRESTServer(client, sqsClient, *result.QueueUrl, 6000)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)
