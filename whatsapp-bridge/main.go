@@ -246,41 +246,57 @@ type SendMessageResponseWithLog struct {
 type RevokeMessageRequest struct {
 	ChatJID   string `json:"chat_jid"`
 	MessageID string `json:"message_id"`
-	SenderJID string `json:"sender_jid"`
 }
 
 // Handler for revoking messages ("delete for everyone")
 func revokeMessageHandler(client *whatsmeow.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: "Method not allowed"})
 			return
 		}
 
 		var req RevokeMessageRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request payload", http.StatusBadRequest)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: "Invalid request payload"})
 			return
 		}
 
 		if req.ChatJID == "" || req.MessageID == "" {
-			http.Error(w, "chat_jid and message_id are required", http.StatusBadRequest)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: "chat_jid and message_id are required"})
 			return
 		}
 
-		// Parse JIDs
-		recipientJID, err := types.ParseJID(req.ChatJID)
-		if err != nil {
-			http.Error(w, "Invalid chat_jid", http.StatusBadRequest)
+		if client.Store.ID == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: "Client not logged in"})
 			return
+		}
+
+		var recipientJID types.JID
+		var err error
+		if strings.Contains(req.ChatJID, "@") {
+			// Assume it's a full JID (like for groups)
+			recipientJID, err = types.ParseJID(req.ChatJID)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: fmt.Sprintf("Invalid chat_jid: %v", err)})
+				return
+			}
+		} else {
+			// Assume it's a phone number, construct user JID
+			recipientJID = types.NewJID(req.ChatJID, types.DefaultUserServer)
 		}
 
 		// Revoke the message using the whatsmeow client
 		_, err = client.RevokeMessage(recipientJID, types.MessageID(req.MessageID))
-
-		w.Header().Set("Content-Type", "application/json")
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to revoke message: %v", err), http.StatusInternalServerError)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: fmt.Sprintf("Failed to revoke message: %v", err)})
 			return
 		}
 
@@ -1281,12 +1297,15 @@ func main() {
 				}
 
 				err = sendMessageToQueue(WALogMessageForQueue{
-					Type:    "video",
-					From:    sender,
-					To:      recipient,
-					Message: caption,
-					Time:    timestamp,
-					File:    url,
+					Type:            "video",
+					From:            sender,
+					To:              recipient,
+					Message:         caption,
+					Time:            timestamp,
+					File:            url,
+					AdminPhone:      adminPhone,
+					MessageID:       messageId,
+					ParentMessageID: parentMessageId,
 				}, sqsClient, *result.QueueUrl)
 				if err != nil {
 					logger.Errorf("❌ Failed to send video message to SQS: %v", err)
