@@ -242,6 +242,55 @@ type SendMessageResponseWithLog struct {
 	Message string `json:"message"`
 }
 
+// RevokeMessageRequest defines the structure for the delete request
+type RevokeMessageRequest struct {
+	ChatJID   string `json:"chat_jid"`
+	MessageID string `json:"message_id"`
+	SenderJID string `json:"sender_jid"`
+}
+
+// Handler for revoking messages ("delete for everyone")
+func revokeMessageHandler(client *whatsmeow.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req RevokeMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request payload", http.StatusBadRequest)
+			return
+		}
+
+		if req.ChatJID == "" || req.MessageID == "" {
+			http.Error(w, "chat_jid and message_id are required", http.StatusBadRequest)
+			return
+		}
+
+		// Parse JIDs
+		recipientJID, err := types.ParseJID(req.ChatJID)
+		if err != nil {
+			http.Error(w, "Invalid chat_jid", http.StatusBadRequest)
+			return
+		}
+
+		// Revoke the message using the whatsmeow client
+		_, err = client.RevokeMessage(recipientJID, types.MessageID(req.MessageID))
+
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to revoke message: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		json.NewEncoder(w).Encode(SendMessageResponse{
+			Success: true,
+			Message: "Message retracted successfully ('for everyone').",
+		})
+	}
+}
+
 // Function to send a WhatsApp message
 func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, parentMessageID string) (bool, string, string, string) {
 	if !client.IsConnected() {
@@ -612,6 +661,8 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 			Message: msg,
 		})
 	})
+
+	http.HandleFunc("/api/delete-message", revokeMessageHandler(client))
 
 	http.HandleFunc("/api/send-image", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("Received request to send message")
