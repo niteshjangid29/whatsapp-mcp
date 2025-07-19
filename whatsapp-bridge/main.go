@@ -927,7 +927,7 @@ func recieveMessagesFromQueue(sqsClient *sqs.Client, queueUrl string) error {
 			logErr = logfunction.LogMessage(message.From, message.Message, message.To, message.Time, message.AdminPhone, message.MessageID, message.ParentMessageID)
 		case "image":
 			logErr = logfunction.LogImageMessageSQS(message.From, message.Message, message.To, message.File, message.Time, message.AdminPhone, message.MessageID, message.ParentMessageID)
-		case "document":
+		case "document", "audio", "video":
 			logErr = logfunction.LogDocumentMessageSQS(message.From, message.Message, message.To, message.File, message.Time, message.AdminPhone, message.MessageID, message.ParentMessageID)
 		default:
 			fmt.Println("❌ Unknown message type:", message.Type)
@@ -1081,6 +1081,8 @@ func main() {
 			document := v.Message.DocumentMessage
 			location := v.Message.LocationMessage
 			contact := v.Message.ContactMessage
+			audio := v.Message.AudioMessage
+			video := v.Message.VideoMessage
 			contacts := v.Message.ContactsArrayMessage
 			messageId := v.Info.ID
 			parentMessageId := ""
@@ -1100,6 +1102,10 @@ func main() {
 			} else if m := v.Message.GetLocationMessage(); m != nil {
 				contextInfo = m.GetContextInfo()
 			} else if m := v.Message.GetVideoMessage(); m != nil {
+				contextInfo = m.GetContextInfo()
+			} else if m := v.Message.GetAudioMessage(); m != nil {
+				contextInfo = m.GetContextInfo()
+			} else if m := v.Message.GetContactsArrayMessage(); m != nil {
 				contextInfo = m.GetContextInfo()
 			}
 
@@ -1154,6 +1160,82 @@ func main() {
 					return
 				} else {
 					logger.Infof("✅ Document message sent to SQS queue successfully")
+				}
+			}
+
+			// Check if message is an audio message
+			if audio != nil {
+				data, err := client.Download(v.Message.AudioMessage)
+				if err != nil {
+					logger.Errorf("❌ Failed to download audio: %v", err)
+					return
+				}
+
+				// Save audio temporarily
+				tmpFile := fmt.Sprintf("whatsapp_failed_files/audio_%d.mp3", time.Now().UnixNano())
+
+				// upload to s3
+				url, err := uploadToS3(os.Getenv("AWS_S3_BUCKET_NAME"), tmpFile, data)
+				if err != nil {
+					logger.Errorf("❌ Failed to upload audio to S3: %v", err)
+					return
+				}
+
+				timestamp := v.Info.Timestamp
+
+				err = sendMessageToQueue(WALogMessageForQueue{
+					Type:            "audio",
+					From:            sender,
+					To:              recipient,
+					Message:         "",
+					Time:            timestamp,
+					File:            url,
+					AdminPhone:      adminPhone,
+					MessageID:       messageId,
+					ParentMessageID: parentMessageId,
+				}, sqsClient, *result.QueueUrl)
+				if err != nil {
+					logger.Errorf("❌ Failed to send audio message to SQS: %v", err)
+				} else {
+					logger.Infof("✅ Audio message sent to SQS queue successfully")
+				}
+			}
+
+			if video != nil {
+				data, err := client.Download(v.Message.VideoMessage)
+				if err != nil {
+					logger.Errorf("❌ Failed to download video: %v", err)
+					return
+				}
+
+				// Save video temporarily
+				tmpFile := fmt.Sprintf("whatsapp_failed_files/video_%d.mp4", time.Now().UnixNano())
+
+				// upload to s3
+				url, err := uploadToS3(os.Getenv("AWS_S3_BUCKET_NAME"), tmpFile, data)
+				if err != nil {
+					logger.Errorf("❌ Failed to upload video to S3: %v", err)
+					return
+				}
+
+				timestamp := v.Info.Timestamp
+				caption := ""
+				if v.Message.VideoMessage.Caption != nil {
+					caption = *v.Message.VideoMessage.Caption
+				}
+
+				err = sendMessageToQueue(WALogMessageForQueue{
+					Type:    "video",
+					From:    sender,
+					To:      recipient,
+					Message: caption,
+					Time:    timestamp,
+					File:    url,
+				}, sqsClient, *result.QueueUrl)
+				if err != nil {
+					logger.Errorf("❌ Failed to send video message to SQS: %v", err)
+				} else {
+					logger.Infof("✅ Video message sent to SQS queue successfully")
 				}
 			}
 
