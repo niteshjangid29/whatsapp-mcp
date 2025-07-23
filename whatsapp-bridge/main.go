@@ -1108,14 +1108,14 @@ func main() {
 		return
 	}
 
-	container, err := sqlstore.New("sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
 	}
 
 	// Get device store - This contains session information
-	deviceStore, err := container.GetFirstDevice()
+	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// No device exists, create one
@@ -1221,7 +1221,7 @@ func main() {
 
 			// Check if the message is a document
 			if document != nil {
-				data, err := client.Download(v.Message.DocumentMessage)
+				data, err := client.Download(context.Background(), v.Message.DocumentMessage)
 				if err != nil {
 					logger.Errorf("❌ Failed to download document: %v", err)
 					return
@@ -1263,7 +1263,7 @@ func main() {
 
 			// Check if message is an audio message
 			if audio != nil {
-				data, err := client.Download(v.Message.AudioMessage)
+				data, err := client.Download(context.Background(), v.Message.AudioMessage)
 				if err != nil {
 					logger.Errorf("❌ Failed to download audio: %v", err)
 					return
@@ -1300,7 +1300,7 @@ func main() {
 			}
 
 			if video != nil {
-				data, err := client.Download(v.Message.VideoMessage)
+				data, err := client.Download(context.Background(), v.Message.VideoMessage)
 				if err != nil {
 					logger.Errorf("❌ Failed to download video: %v", err)
 					return
@@ -1341,7 +1341,7 @@ func main() {
 			}
 
 			if image != nil {
-				data, err := client.Download(v.Message.ImageMessage)
+				data, err := client.Download(context.Background(), v.Message.ImageMessage)
 				if err != nil {
 					logger.Errorf("❌ Failed to download image: %v", err)
 					return
@@ -1679,7 +1679,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		logger.Infof("Getting name for contact: %s", chatJID)
 
 		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(jid)
+		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
 		if err == nil && contact.FullName != "" {
 			name = contact.FullName
 		} else if sender != "" {
