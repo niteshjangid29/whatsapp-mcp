@@ -957,7 +957,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 	}()
 }
 
-const LogAPIEndpoint = "https://backend.railse.com/whatsapp/log-message"
+const LogAPIEndpoint = "http://privatebackend.railse.com:8080/whatsapp/log-message"
 
 type WALogMessageForQueue struct {
 	MessageID       string    `json:"wa_message_id"`

@@ -13,7 +13,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-const LogAPIEndpoint = "https://backend.railse.com/whatsapp/log-message"
+const LogAPIEndpoint = "http://privatebackend.railse.com:8080/whatsapp/log-message"
 
 func LogMessage(senderPhone string, text string, recipientPhone string, messageTime time.Time, adminPhone string, msgId string, parMsgId string) error {
 	body := &bytes.Buffer{}
