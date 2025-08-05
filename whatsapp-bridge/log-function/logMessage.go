@@ -20,9 +20,8 @@ func LogMessage(senderPhone string, text string, recipientPhone string, messageT
 	writer := multipart.NewWriter(body)
 
 	// load .env file
-	err := godotenv.Load()
-	if err != nil {
-		return err
+	if err := godotenv.Load(); err != nil {
+		return fmt.Errorf("error loading .env file: %w", err)
 	}
 	// get BEARER_TOKEN from .env file
 	bearerToken := os.Getenv("BEARER_TOKEN")
@@ -39,28 +38,32 @@ func LogMessage(senderPhone string, text string, recipientPhone string, messageT
 	_ = writer.WriteField("wa_message_id", msgId)
 	_ = writer.WriteField("wa_parent_message_id", parMsgId)
 
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("error closing multipart writer: %w", err)
+	}
 
 	req, err := http.NewRequest("POST", LogAPIEndpoint, body)
 	if err != nil {
-		return fmt.Errorf("error creating request: %v", err)
+		return fmt.Errorf("error creating request: %w", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+bearerToken)
 
-	// log.Println("📤 REQUEST", req)
-
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 15 * time.Second, // Add a timeout to prevent hanging
+	}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Println("❌ Error sending log:", err)
-		return err
+		log.Printf("❌ Error sending log for message %s: %v", msgId, err)
+		return fmt.Errorf("error sending log: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Println("❌ Error response from log API:", resp.Status)
+		log.Printf("❌ Error response from log API for message %s: %s", msgId, resp.Status)
 		return fmt.Errorf("error response from log API: %s", resp.Status)
 	}
+
+	log.Printf("✅ Successfully logged message %s", msgId)
 	return nil
 }

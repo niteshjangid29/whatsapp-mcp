@@ -253,6 +253,7 @@ type RevokeMessageRequest struct {
 // Handler for revoking messages ("delete for everyone")
 func revokeMessageHandler(client *whatsmeow.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("Received request for /api/delete-message")
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -570,8 +571,17 @@ func createWhatsAppGroup(client *whatsmeow.Client, req CreateGroupRequest) (Crea
 
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL string, port int) {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "Hello World")
+	})
+
+	http.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "Hello World test")
+	})
+
 	// Handler for getting login status
 	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("Received request for /api/status")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{
 			"logged_in": client.Store.ID != nil,
@@ -581,6 +591,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 
 	// Handler for getting QR code
 	http.HandleFunc("/api/qr-code", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("Received request for /api/qr-code")
 		w.Header().Set("Content-Type", "application/json")
 		if qrCodeStr != "" {
 			w.WriteHeader(http.StatusOK)
@@ -593,7 +604,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 
 	// Handler for creating a group
 	http.HandleFunc("/api/create-group", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Println("Received request to create group")
+		fmt.Println("Received request for /api/create-group")
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -629,7 +640,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 
 		// Only allow POST requests
-		fmt.Println("Received request to send message")
+		fmt.Println("Received request for /api/send")
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -705,7 +716,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 	http.HandleFunc("/api/delete-message", revokeMessageHandler(client))
 
 	http.HandleFunc("/api/send-image", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Println("Received request to send message")
+		fmt.Println("Received request for /api/send-image")
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -812,7 +823,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 	})
 
 	http.HandleFunc("/api/send-document", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Println("Received request to send document message")
+		fmt.Println("Received request for /api/send-document")
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -914,7 +925,7 @@ func startRESTServer(client *whatsmeow.Client, sqsClient *sqs.Client, queueURL s
 	})
 
 	http.HandleFunc("/api/groups", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Println("Received request for group info")
+		fmt.Println("Received request for /api/groups")
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -1006,10 +1017,9 @@ func recieveMessagesFromQueue(sqsClient *sqs.Client, queueUrl string) error {
 
 	for _, msg := range output.Messages {
 		var message WALogMessageForQueue
-		err := json.Unmarshal([]byte(*msg.Body), &message)
-		if err != nil {
-			fmt.Println("❌ Error unmarshalling message:", err)
-			continue
+		if err := json.Unmarshal([]byte(*msg.Body), &message); err != nil {
+			fmt.Printf("❌ Error unmarshalling message %s: %v. Message will be retried.\n", *msg.MessageId, err)
+			continue // Do not delete, allow for retry
 		}
 
 		var logErr error
@@ -1021,22 +1031,24 @@ func recieveMessagesFromQueue(sqsClient *sqs.Client, queueUrl string) error {
 		case "document", "audio", "video":
 			logErr = logfunction.LogDocumentMessageSQS(message.From, message.Message, message.To, message.File, message.Time, message.AdminPhone, message.MessageID, message.ParentMessageID)
 		default:
-			fmt.Println("❌ Unknown message type:", message.Type)
-			continue
+			fmt.Printf("❌ Unknown message type '%s' for message %s.\n", message.Type, message.MessageID)
+			continue // Do not delete, allow for retry
 		}
 
 		if logErr != nil {
-			fmt.Println("❌ Error logging message:", logErr)
-			continue
+			fmt.Printf("❌ Error logging message %s: %v.\n", message.MessageID, logErr)
+			continue // Do not delete, allow for retry
 		}
 
-		// Delete from queue
+		// If we reach here, processing was successful, so we can delete the message.
 		_, err = sqsClient.DeleteMessage(context.Background(), &sqs.DeleteMessageInput{
 			QueueUrl:      aws.String(queueUrl),
 			ReceiptHandle: msg.ReceiptHandle,
 		})
 		if err != nil {
-			return fmt.Errorf("error deleting message from SQS: %w", err)
+			// If deletion fails, the message will be processed again.
+			// This is a trade-off, but it's better than losing the message.
+			return fmt.Errorf("error deleting message %s from SQS: %w", message.MessageID, err)
 		}
 		fmt.Println("✅ Message processed and deleted from SQS:", message.Message)
 	}
